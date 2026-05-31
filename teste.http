@@ -1,0 +1,39 @@
+### 1. Test Key Telemetry (Basic Route)
+GET http://localhost:3000/api/aquisicao
+
+###
+
+### 2. Test Full Metadata Environment (Advanced Route)
+GET http://localhost:3000/api/aquisicao/avancada
+
+###
+
+### 3. Force Manual Rain Storm
+POST http://localhost:3000/api/controle/chuva
+Content-Type: application/json
+
+{
+    "duracao": 20,
+    "intensidade": "forte"
+}
+
+###
+
+### 4. Override Irrigation Pump manually
+POST http://localhost:3000/api/controle/irrigacao
+Content-Type: application/json
+
+{
+    "ligar": true,
+    "automatico": false
+}
+
+###
+
+### 5. Return Irrigation back to System Control Loop
+POST http://localhost:3000/api/controle/irrigacao
+Content-Type: application/json
+
+{
+    "automatico": true
+}
