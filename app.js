@@ -42,6 +42,23 @@ const VARIAVEIS_ESTACAO = {
     primavera: { minTemp: 18.0, maxTemp: 28.5, amanhecer: 5.83, anoitecer: 18.00, chanceChuvaPorMin: 0.0033 }
 };
 
+function getDataBrasilia() {
+    const agora = new Date();
+    const utc = agora.getTime() + (agora.getTimezoneOffset() * 60000);
+    return new Date(utc + (3600000 * -3));
+}
+
+function formatarDataHora(data) {
+    const pad = (num) => String(num).padStart(2, '0');
+    const ano = data.getFullYear();
+    const mes = pad(data.getMonth() + 1);
+    const dia = pad(data.getDate());
+    const hora = pad(data.getHours());
+    const minuto = pad(data.getMinutes());
+    const segundo = pad(data.getSeconds());
+    return `${ano}-${mes}-${dia} ${hora}:${minuto}:${segundo}`;
+}
+
 // =========================================================================
 // SIMULAÇÃO
 // =========================================================================
@@ -66,17 +83,17 @@ class HortaSimulador {
         };
     }
 
-    obterEstacaoAtual(mes) {
-        if ([11, 0, 1].includes(mes)) return 'verao';
-        if ([2, 3, 4].includes(mes)) return 'outono';
-        if ([5, 6, 7].includes(mes)) return 'inverno';
+    obterEstacaoAtual(mesZeroBased) {
+        if ([11, 0, 1].includes(mesZeroBased)) return 'verao';
+        if ([2, 3, 4].includes(mesZeroBased)) return 'outono';
+        if ([5, 6, 7].includes(mesZeroBased)) return 'inverno';
         return 'primavera';
     }
 
     atualizarCicloMinuto() {
-        const agora = new Date();
-        const mes = agora.getMonth();
-        const horaDecimal = agora.getHours() + (agora.getMinutes() / 60);
+        const agoraBR = getDataBrasilia();
+        const mes = agoraBR.getMonth();
+        const horaDecimal = agoraBR.getHours() + (agoraBR.getMinutes() / 60);
 
         this.state.estacaoCalculada = this.obterEstacaoAtual(mes);
         const estacao = VARIAVEIS_ESTACAO[this.state.estacaoCalculada];
@@ -101,7 +118,7 @@ class HortaSimulador {
 
         // 3. CONDIÇÃO DO CÉU
         if (!this.state.estaChovendo) {
-            if (agora.getMinutes() === 0) {
+            if (agoraBR.getMinutes() === 0) {
                 const dadosCeuRoll = Math.random();
                 this.state.condicaoCeu = dadosCeuRoll < 0.65 ? "ensolarado" : "nublado";
             }
@@ -160,7 +177,7 @@ class HortaSimulador {
             }
         }
 
-        // 5. IRRIGAÇÃO MANUAL
+        // 5. IRRIGAÇÃO AUTOMÁTICA / MANUAL
         if (!this.state.modoIrrigacaoManual) {
             if (this.state.umidadeSolo < LETTUCE_AGRONOMY.MOISTURE_CRITICAL_ALERT) {
                 this.state.statusIrrigacao = "LIGADO";
@@ -194,10 +211,10 @@ class HortaSimulador {
 
         this.state.umidadeSolo = Math.max(this.state.umidadeSolo, SOIL_PHYSICS.MIN_ABSOLUTE_MOISTURE);
 
-        // 7. TERRA
+        // 7. TEMPERATURA DO SOLO
         this.state.tempSolo = (this.state.tempSolo * (1 - SOIL_PHYSICS.THERMAL_INERTIA_WEIGHT)) + (temperaturaAtual * SOIL_PHYSICS.THERMAL_INERTIA_WEIGHT);
 
-        // 8. PERSISTÊNCIA
+        // 8. PERSISTÊNCIA DOS ARREDONDAMENTOS
         this.state.temperaturaCalculada = parseFloat(temperaturaAtual.toFixed(1));
         this.state.umidadeArCalculada = parseFloat(umidadeAr.toFixed(1));
         this.state.luzCalculada = Math.round(luzIntensidade);
@@ -225,7 +242,7 @@ const simulador = new HortaSimulador();
 setInterval(() => simulador.atualizarCicloMinuto(), 60000);
 
 // =========================================================================
-// ROTA API
+// ROTAS DA API
 // =========================================================================
 
 app.get('/', (req, res) => {
@@ -235,8 +252,8 @@ app.get('/', (req, res) => {
 // ROTA 1: BÁSICA
 app.get('/api/aquisicao', (req, res) => {
     try {
-        const agora = new Date();
-        const dataHoraFormatada = agora.toISOString().replace('T', ' ').substring(0, 19);
+        const agoraBR = getDataBrasilia();
+        const dataHoraFormatada = formatarDataHora(agoraBR);
         const snapshot = simulador.state;
 
         res.json({
@@ -254,8 +271,8 @@ app.get('/api/aquisicao', (req, res) => {
 // ROTA 2: AVANÇADA
 app.get('/api/aquisicao/avancada', (req, res) => {
     try {
-        const agora = new Date();
-        const dataHoraFormatada = agora.toISOString().replace('T', ' ').substring(0, 19);
+        const agoraBR = getDataBrasilia();
+        const dataHoraFormatada = formatarDataHora(agoraBR);
         const snapshot = simulador.state;
 
         res.json({
