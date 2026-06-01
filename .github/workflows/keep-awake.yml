@@ -1,0 +1,13 @@
+name: Keep Azure API Awake
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Hit Azure Endpoint
+        run: curl -s https://horta-api-htggarb3eagagpgm.brazilsouth-01.azurewebsites.net/api/aquisicao
