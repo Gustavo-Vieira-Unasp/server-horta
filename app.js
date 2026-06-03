@@ -7,6 +7,7 @@ const app = express();
 
 app.use(cors());
 app.use(express.json());
+app.set('case sensitive routing', false);
 
 const STATE_FILE_PATH = path.join(__dirname, 'simulacao_estado.json');
 
@@ -284,7 +285,7 @@ app.get('/', (req, res) => {
 });
 
 // ROTA 1: BÁSICA
-app.get('/api/aquisicao', (req, res) => {
+app.get(['/api/aquisicao', '/api/aquisicao/'], (req, res) => {
     try {
         const agoraBR = getDataBrasilia();
         const dataHoraFormatada = formatarDataHora(agoraBR);
@@ -304,7 +305,7 @@ app.get('/api/aquisicao', (req, res) => {
 });
 
 // ROTA 2: AVANÇADA
-app.get('/api/aquisicao/avancada', (req, res) => {
+app.get(['/api/aquisicao/avancada', '/api/aquisicao/avancada/'], (req, res) => {
     try {
         const agoraBR = getDataBrasilia();
         const dataHoraFormatada = formatarDataHora(agoraBR);
@@ -346,7 +347,7 @@ app.get('/api/aquisicao/avancada', (req, res) => {
 });
 
 // ROTA 3: CONTROLE DE IRRIGAÇÃO MANUAL (POST)
-app.post('/api/controle/irrigacao', (req, res) => {
+app.post(['/api/controle/irrigacao', '/api/controle/irrigacao/'], (req, res) => {
     try {
         const { ligar, automatico } = req.body;
 
@@ -370,7 +371,7 @@ app.post('/api/controle/irrigacao', (req, res) => {
 });
 
 // ROTA 4: FORÇAR EVENTO DE PRECIPITAÇÃO ATMOSFÉRICA (POST)
-app.post('/api/controle/chuva', (req, res) => {
+app.post(['/api/controle/chuva', '/api/controle/chuva/'], (req, res) => {
     try {
         const { duracao, intensidade } = req.body;
         const intensidadesValidas = ["leve", "moderada", "forte"];
@@ -385,7 +386,7 @@ app.post('/api/controle/chuva', (req, res) => {
 
         simulador.forcarChuvaManual(duracao, intensidade);
         res.json({ 
-            mensagem: `Evento climático inserido. Chovendo em Engenheiro Coelho por ${duracao} minutos.`,
+            mensagem: `Evento climático inserido. Chovendo por ${duracao} minutos.`,
             condicaoCeu: simulador.state.condicaoCeu,
             intensidade: simulador.state.intensidadeChuva
         });
