@@ -2,7 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
-app.use(express.json());
+
 const app = express();
 
 app.use(cors());
@@ -293,6 +293,7 @@ app.get('/api/aquisicao', (req, res) => {
         res.json({
             "id": snapshot.id,
             "dataHora": dataHoraFormatada,
+            "umidadeSoloPorcentagem": parseFloat(snapshot.umidadeSolo.toFixed(1)),
             "temperatura": snapshot.temperaturaCalculada,
             "UmidadeAr": Math.round(snapshot.umidadeArCalculada),
             "pHSolo": parseFloat(snapshot.pHSolo.toFixed(1))
