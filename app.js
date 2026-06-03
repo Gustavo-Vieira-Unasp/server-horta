@@ -1,9 +1,14 @@
 const express = require('express');
 const cors = require('cors');
+const fs = require('fs');
+const path = require('path');
+app.use(express.json());
 const app = express();
 
 app.use(cors());
 app.use(express.json());
+
+const STATE_FILE_PATH = path.join(__dirname, 'simulacao_estado.json');
 
 // =========================================================================
 // CONFIGURAÇÕES & PARAMETROS
@@ -81,6 +86,30 @@ class HortaSimulador {
             tempSolo: 21.5,
             modoIrrigacaoManual: false
         };
+
+        this.carregarEstadoDoDisco();
+    }
+
+    salvarEstadoNoDisco() {
+        try {
+            fs.writeFileSync(STATE_FILE_PATH, JSON.stringify(this.state, null, 2), 'utf8');
+        } catch (erro) {
+            console.error("Erro ao persistir estado no disco:", erro.message);
+        }
+    }
+
+    carregarEstadoDoDisco() {
+        try {
+            if (fs.existsSync(STATE_FILE_PATH)) {
+                const dadosArmazenados = fs.readFileSync(STATE_FILE_PATH, 'utf8');
+                this.state = JSON.parse(dadosArmazenados);
+                console.log(`MEMORY RESTORED! Resuming from ID: ${this.state.id}`);
+            } else {
+                console.log("No prior cache file found. Starting simulation from ID 1.");
+            }
+        } catch (erro) {
+            console.error("Falha ao ler cache do disco, utilizando valores padrao:", erro.message);
+        }
     }
 
     obterEstacaoAtual(mesZeroBased) {
@@ -219,6 +248,8 @@ class HortaSimulador {
         this.state.umidadeArCalculada = parseFloat(umidadeAr.toFixed(1));
         this.state.luzCalculada = Math.round(luzIntensidade);
         this.state.id++;
+
+        this.salvarEstadoNoDisco();
     }
 
     forcarChuvaManual(duracaoMinutos, intensidade) {
@@ -226,15 +257,18 @@ class HortaSimulador {
         this.state.tempoRestanteChuva = duracaoMinutos;
         this.state.intensidadeChuva = intensidade;
         this.state.condicaoCeu = "chuvoso";
+        this.salvarEstadoNoDisco();
     }
 
     configurarIrrigacaoManual(statusAtuador) {
         this.state.modoIrrigacaoManual = true;
         this.state.statusIrrigacao = statusAtuador ? "LIGADO" : "DESLIGADO";
+        this.salvarEstadoNoDisco();
     }
 
     restaurarIrrigacaoAutomatica() {
         this.state.modoIrrigacaoManual = false;
+        this.salvarEstadoNoDisco();
     }
 }
 
