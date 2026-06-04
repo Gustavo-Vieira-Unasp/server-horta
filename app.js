@@ -4,8 +4,8 @@ const { MongoClient } = require('mongodb');
 require('dotenv').config();
 
 const MONGO_URI = process.env.MONGO_URI;
-const DB_NAME = "horta_db";
-const COLLECTION_NAME = "estado_simulacao";
+const DB_NAME = process.env.DB_NAME || "horta_db";
+const COLLECTION_NAME = process.env.COLLECTION_NAME || "estado_simulacao";
 
 const app = express();
 
@@ -69,6 +69,26 @@ function formatarDataHora(data) {
     return `${ano}-${mes}-${dia} ${hora}:${minuto}:${segundo}`;
 }
 
+function gerarBaselineInicial() {
+    return {
+        id: 1,
+        timestampReal: getDataBrasilia(),
+        umidadeSolo: 65.0,
+        pHSolo: LETTUCE_AGRONOMY.PH_IDEAL,
+        temperaturaCalculada: 22.0,
+        umidadeArCalculada: 75.0,
+        luzCalculada: 0,
+        estaChovendo: false,
+        condicaoCeu: "ensolarado",
+        intensidadeChuva: "nenhuma",
+        tempoRestanteChuva: 0,
+        statusIrrigacao: "DESLIGADO",
+        estacaoCalculada: "outono",
+        tempSolo: 21.5,
+        modoIrrigacaoManual: false
+    };
+}
+
 async function fetchLatestState() {
     return await dbCollection.find().sort({ timestampReal: -1 }).limit(1).next();
 }
@@ -85,27 +105,11 @@ async function conectarBanco() {
         await client.connect();
         const db = client.db(DB_NAME);
         dbCollection = db.collection(COLLECTION_NAME);
-        console.log("Connected successfully to MongoDB Atlas Cloud Cluster!");
+        console.log(`Connected successfully to MongoDB Database [${DB_NAME}] -> Collection [${COLLECTION_NAME}]`);
 
         const count = await dbCollection.countDocuments();
         if (count === 0) {
-            const initialSeed = {
-                id: 1,
-                timestampReal: getDataBrasilia(),
-                umidadeSolo: 65.0,
-                pHSolo: 6.2,
-                temperaturaCalculada: 22.0,
-                umidadeArCalculada: 75.0,
-                luzCalculada: 0,
-                estaChovendo: false,
-                condicaoCeu: "ensolarado",
-                intensidadeChuva: "nenhuma",
-                tempoRestanteChuva: 0,
-                statusIrrigacao: "DESLIGADO",
-                estacaoCalculada: "outono",
-                tempSolo: 21.5,
-                modoIrrigacaoManual: false
-            };
+            const initialSeed = gerarBaselineInicial();
             await dbCollection.insertOne(initialSeed);
             console.log("Database seeded with foundational tracking node.");
         }
@@ -314,7 +318,7 @@ async function rodarCicloSincronizado() {
     setTimeout(rodarCicloSincronizado, msAteProximoMinuto);
 }
 
-async function garantirSincroniaMiddleware(req, res, next) {
+async function garantizarSincroniaMiddleware(req, res, next) {
     if (dbCollection) {
         await sincronizarEProcessarHorta();
     }
@@ -330,7 +334,7 @@ app.get('/', (req, res) => {
 });
 
 // ROTA 1: TELEMETRIA ATUAL SIMPLES
-app.get(['/api/aquisicao', '/api/aquisicao/'], garantirSincroniaMiddleware, async (req, res) => {
+app.get(['/api/aquisicao', '/api/aquisicao/'], garantizarSincroniaMiddleware, async (req, res) => {
     try {
         const snapshot = await fetchLatestState();
         const dataHoraFormatada = formatarDataHora(snapshot.timestampReal || getDataBrasilia());
@@ -349,7 +353,7 @@ app.get(['/api/aquisicao', '/api/aquisicao/'], garantirSincroniaMiddleware, asyn
 });
 
 // ROTA 2: TELEMETRIA ATUAL AVANÇADA
-app.get(['/api/aquisicao/avancada', '/api/aquisicao/avancada/'], garantirSincroniaMiddleware, async (req, res) => {
+app.get(['/api/aquisicao/avancada', '/api/aquisicao/avancada/'], garantizarSincroniaMiddleware, async (req, res) => {
     try {
         const snapshot = await fetchLatestState();
         const dataHoraFormatada = formatarDataHora(snapshot.timestampReal || getDataBrasilia());
@@ -390,7 +394,7 @@ app.get(['/api/aquisicao/avancada', '/api/aquisicao/avancada/'], garantirSincron
 });
 
 // ROTA HISTÓRICO 1: OTIMIZADA PARA COLETAR DADOS PARA GRÁFICOS DO DASHBOARD
-app.get(['/api/historico/completo', '/api/historico/completo/'], garantirSincroniaMiddleware, async (req, res) => {
+app.get(['/api/historico/completo', '/api/historico/completo/'], garantizarSincroniaMiddleware, async (req, res) => {
     try {
         const rawLogs = await dbCollection.find().sort({ timestampReal: 1 }).toArray();
         
@@ -416,7 +420,7 @@ app.get(['/api/historico/completo', '/api/historico/completo/'], garantirSincron
 });
 
 // ROTA HISTÓRICO 2: BUSCAR DETALHES DE UM MINUTO ESPECÍFICO
-app.get('/api/historico/minuto/:id', garantirSincroniaMiddleware, async (req, res) => {
+app.get('/api/historico/minuto/:id', garantizarSincroniaMiddleware, async (req, res) => {
     try {
         const targetId = parseInt(req.params.id);
         const snapshot = await dbCollection.findOne({ id: targetId });
@@ -431,7 +435,7 @@ app.get('/api/historico/minuto/:id', garantirSincroniaMiddleware, async (req, re
 });
 
 // ROTA 3: CONTROLE DE IRRIGAÇÃO MANUAL (POST)
-app.post(['/api/controle/irrigacao', '/api/controle/irrigacao/'], garantirSincroniaMiddleware, async (req, res) => {
+app.post(['/api/controle/irrigacao', '/api/controle/irrigacao/'], garantizarSincroniaMiddleware, async (req, res) => {
     try {
         const { ligar, automatico } = req.body;
         const state = await fetchLatestState();
@@ -465,7 +469,7 @@ app.post(['/api/controle/irrigacao', '/api/controle/irrigacao/'], garantirSincro
 });
 
 // ROTA 4: FORÇAR EVENTO DE PRECIPITAÇÃO ATMOSFÉRICA (POST)
-app.post(['/api/controle/chuva', '/api/controle/chuva/'], garantirSincroniaMiddleware, async (req, res) => {
+app.post(['/api/controle/chuva', '/api/controle/chuva/'], garantizarSincroniaMiddleware, async (req, res) => {
     try {
         const { duracao, intensidade } = req.body;
         const intensidadesValidas = ["leve", "moderada", "forte"];
@@ -508,23 +512,8 @@ app.post(['/api/controle/reset-total', '/api/controle/reset-total/'], async (req
     try {
         await dbCollection.deleteMany({});
         
-        const baseline = {
-            id: 1,
-            timestampReal: getDataBrasilia(),
-            umidadeSolo: 65.0,
-            pHSolo: 6.2,
-            temperaturaCalculada: 22.0,
-            umidadeArCalculada: 75.0,
-            luzCalculada: 0,
-            estaChovendo: false,
-            condicaoCeu: "ensolarado",
-            intensidadeChuva: "nenhuma",
-            tempoRestanteChuva: 0,
-            statusIrrigacao: "DESLIGADO",
-            estacaoCalculada: "outono",
-            tempSolo: 21.5,
-            modoIrrigacaoManual: false
-        };
+        // Agora usa o helper centralizado livre de hardcodes estruturais
+        const baseline = gerarBaselineInicial();
 
         await dbCollection.insertOne(baseline);
         res.json({ 
