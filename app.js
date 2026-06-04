@@ -14,6 +14,7 @@ app.use(express.json());
 app.set('case sensitive routing', false); 
 
 let dbCollection;
+let isSyncing = false;
 
 // =========================================================================
 // CONFIGURAÇÕES & PARAMETROS
@@ -22,6 +23,8 @@ let dbCollection;
 const GEOGRAPHIC_CONFIG = {
     ELEVATION_METERS: 612,
 };
+
+const ALTITUDE_TEMP_CORRECTION = (GEOGRAPHIC_CONFIG.ELEVATION_METERS / 100) * 0.65;
 
 const LETTUCE_AGRONOMY = {
     PH_IDEAL: 6.2,
@@ -54,38 +57,42 @@ const VARIAVEIS_ESTACAO = {
 
 function getDataBrasilia() {
     const agora = new Date();
-    const utc = agora.getTime() + (agora.getTimezoneOffset() * 60000);
-    return new Date(utc + (3600000 * -3));
+    const formatter = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'America/Sao_Paulo',
+        year: 'numeric', month: 'numeric', day: 'numeric',
+        hour: 'numeric', minute: 'numeric', second: 'numeric', hour12: false
+    });
+    
+    const parts = formatter.formatToParts(agora);
+    const map = Object.fromEntries(parts.map(p => [p.type, p.value]));
+    
+    return new Date(Date.UTC(
+        map.year, map.month - 1, map.day,
+        map.hour, map.minute, map.second
+    ));
 }
 
 function formatarDataHora(data) {
     const pad = (num) => String(num).padStart(2, '0');
-    const ano = data.getFullYear();
-    const mes = pad(data.getMonth() + 1);
-    const dia = pad(data.getDate());
-    const hora = pad(data.getHours());
-    const minuto = pad(data.getMinutes());
-    const segundo = pad(data.getSeconds());
-    return `${ano}-${mes}-${dia} ${hora}:${minuto}:${segundo}`;
+    return `${data.getFullYear()}-${pad(data.getMonth() + 1)}-${pad(data.getDate())} ${pad(data.getHours())}:${pad(data.getMinutes())}:${pad(data.getSeconds())}`;
 }
 
-function formatarDataHoraCustomizada(data) {
-    const pad = (num) => String(num).padStart(2, '0');
-    const ano = data.getFullYear();
-    const mes = pad(data.getMonth() + 1);
-    const dia = pad(data.getDate());
-    const hora = pad(data.getHours());
-    const minuto = pad(data.getMinutes());
-    
-    return `${ano}-${mes}-${dia} ${hora}:${minuto}:00`;
+function prepararParaInsercao(estado, proximaData, novoId = null) {
+    const limpo = structuredClone(estado);
+    delete limpo._id;
+    limpo.timestampReal = proximaData;
+    if (novoId !== null) {
+        limpo.id = novoId;
+    } else {
+        limpo.id = (estado.id || 0) + 1;
+    }
+    return limpo;
 }
 
 function gerarBaselineInicial() {
-    const agoraBR = getDataBrasilia();
-
     return {
         id: 1, 
-        timestampReal: agoraBR,
+        timestampReal: getDataBrasilia(),
         umidadeSolo: 65.0,
         pHSolo: LETTUCE_AGRONOMY.PH_IDEAL,
         temperaturaCalculada: 22.0,
@@ -114,11 +121,19 @@ async function conectarBanco() {
         if (!MONGO_URI) {
             throw new Error("Missing MONGO_URI environment variable context.");
         }
-        const client = new MongoClient(MONGO_URI);
+        
+        const client = new MongoClient(MONGO_URI, {
+            serverSelectionTimeoutMS: 5000,
+            socketTimeoutMS: 45000,
+        });
+
         await client.connect();
         const db = client.db(DB_NAME);
         dbCollection = db.collection(COLLECTION_NAME);
         console.log(`Connected successfully to MongoDB Database [${DB_NAME}] -> Collection [${COLLECTION_NAME}]`);
+
+        await dbCollection.createIndex({ id: 1 }, { unique: true }).catch(() => {});
+        await dbCollection.createIndex({ timestampReal: -1 }).catch(() => {});
 
         const count = await dbCollection.countDocuments();
         if (count === 0) {
@@ -143,7 +158,7 @@ function obterEstacaoAtual(mesZeroBased) {
 }
 
 function simularProximoMinuto(estadoAnterior, dataAlvo) {
-    const state = JSON.parse(JSON.stringify(estadoAnterior));
+    const state = structuredClone(estadoAnterior);
     
     const mes = dataAlvo.getMonth();
     const horaDecimal = dataAlvo.getHours() + (dataAlvo.getMinutes() / 60);
@@ -157,6 +172,9 @@ function simularProximoMinuto(estadoAnterior, dataAlvo) {
     const tempAmplitude = (estacao.maxTemp - estacao.minTemp) / 2;
     
     let temperaturaAtual = tempBase + (Math.sin(tRad) * tempAmplitude);
+    
+    temperaturaAtual -= ALTITUDE_TEMP_CORRECTION;
+
     temperaturaAtual += (Math.random() - 0.5) * 0.6;
 
     // 2. UMIDADE E LUZ SOLAR
@@ -269,20 +287,20 @@ function simularProximoMinuto(estadoAnterior, dataAlvo) {
     // 8. ARREDONDAMENTOS E ALINHAMENTO DE HORÁRIO
     state.temperaturaCalculada = parseFloat(temperaturaAtual.toFixed(1));
     state.umidadeArCalculada = parseFloat(umidadeAr.toFixed(1));
-    state.luzCalculada = Math.round(luzIntensidade);
+    
+    state.luzCalculada = Math.min(Math.round(luzIntensidade), 100);
 
-    state.id = (estadoAnterior.id || 0) + 1;
-    state.timestampReal = dataAlvo;
-
-    delete state._id; 
-    return state;
+    return prepararParaInsercao(state, dataAlvo, (estadoAnterior.id || 0) + 1);
 }
 
 // =========================================================================
-// SINCRONIZAÇÃO COMPORTAMENTAL BASEADA EM SEGUNDOS ABSOLUTOS (PROTEÇÃO UTC)
+// SINCRONIZAÇÃO COMPORTAMENTAL BASEADA EM SEGUNDOS ABSOLUTOS
 // =========================================================================
 async function sincronizarEProcessarHorta() {
     if (!dbCollection) return;
+
+    if (isSyncing) return;
+    isSyncing = true;
 
     try {
         const agoraBR = getDataBrasilia();
@@ -315,14 +333,21 @@ async function sincronizarEProcessarHorta() {
         }
     } catch (err) {
         console.error("[CRITICAL ENGINE ERROR]:", err.message);
+    } finally {
+        isSyncing = false;
     }
 }
 
 async function rodarCicloSincronizado() {
-    await sincronizarEProcessarHorta();
-    const agora = new Date();
-    const msAteProximoMinuto = 60000 - (agora.getSeconds() * 1000 + agora.getMilliseconds());
-    setTimeout(rodarCicloSincronizado, msAteProximoMinuto);
+    try {
+        await sincronizarEProcessarHorta();
+    } catch (err) {
+        console.error("[SCHEDULER REJECTION ERROR]:", err);
+    } finally {
+        const agora = new Date();
+        const msAteProximoMinuto = 60000 - (agora.getSeconds() * 1000 + agora.getMilliseconds());
+        setTimeout(rodarCicloSincronizado, msAteProximoMinuto);
+    }
 }
 
 async function garantizarSincroniaMiddleware(req, res, next) {
@@ -341,11 +366,9 @@ app.get('/', (req, res) => {
 });
 
 // ROTA 1: TELEMETRIA ATUAL SIMPLES
-// ROTA 1: TELEMETRIA ATUAL SIMPLES
 app.get(['/api/aquisicao', '/api/aquisicao/'], garantizarSincroniaMiddleware, async (req, res) => {
     try {
         const snapshot = await fetchLatestState();
-        // Captura o horário exato da requisição com os segundos reais rodando
         const dataHoraFormatada = formatarDataHora(getDataBrasilia());
 
         res.json({
@@ -353,7 +376,7 @@ app.get(['/api/aquisicao', '/api/aquisicao/'], garantizarSincroniaMiddleware, as
             "dataHora": dataHoraFormatada,
             "umidadeSoloPorcentagem": parseFloat(snapshot.umidadeSolo.toFixed(1)),
             "temperatura": snapshot.temperaturaCalculada,
-            "UmidadeAr": Math.round(snapshot.umidadeArCalculada),
+            "umidadeAr": Math.round(snapshot.umidadeArCalculada),
             "pHSolo": parseFloat(snapshot.pHSolo.toFixed(1))
         });
     } catch (erro) {
@@ -402,17 +425,22 @@ app.get(['/api/aquisicao/avancada', '/api/aquisicao/avancada/'], garantizarSincr
     }
 });
 
-// ROTA HISTÓRICO 1: OTIMIZADA E PADRONIZADA COM O PAYLOAD BÁSICO
+// ROTA HISTÓRICO 1: OTIMIZADA COM FILTRO CURSOR-BASED VIA TIMEFRAME MINUTOS
 app.get(['/api/historico/completo', '/api/historico/completo/'], garantizarSincroniaMiddleware, async (req, res) => {
     try {
-        const rawLogs = await dbCollection.find().sort({ timestampReal: 1 }).toArray();
+        const raw = parseInt(req.query.minutosAtras);
+        const minutosAtras = Math.min((!isNaN(raw) && raw > 0) ? raw : 1440, 10080);
+        const dataCorte = new Date(getDataBrasilia().getTime() - minutosAtras * 60000);
+        const rawLogs = await dbCollection.find({ timestampReal: { $gte: dataCorte } })
+                                          .sort({ timestampReal: 1 })
+                                          .toArray();
         
         const timeline = rawLogs.map(log => ({
             id: log.id,
             dataHora: formatarDataHora(log.timestampReal || getDataBrasilia()),
             umidadeSoloPorcentagem: parseFloat(log.umidadeSolo.toFixed(1)),
             temperatura: log.temperaturaCalculada,
-            UmidadeAr: Math.round(log.umidadeArCalculada),
+            umidadeAr: Math.round(log.umidadeArCalculada),
             pHSolo: parseFloat(log.pHSolo.toFixed(1)),
             luzSolar: log.luzCalculada,
             statusIrrigacao: log.statusIrrigacao === "LIGADO" ? 1 : 0, 
@@ -420,7 +448,8 @@ app.get(['/api/historico/completo', '/api/historico/completo/'], garantizarSincr
         }));
 
         res.json({
-            totalRegistros: timeline.length,
+            totalRegistrosLote: timeline.length,
+            janelaMinutosBuscada: minutosAtras,
             dashboardData: timeline
         });
     } catch (erro) {
@@ -432,6 +461,11 @@ app.get(['/api/historico/completo', '/api/historico/completo/'], garantizarSincr
 app.get('/api/historico/minuto/:id', garantizarSincroniaMiddleware, async (req, res) => {
     try {
         const targetId = parseInt(req.params.id);
+        
+        if (isNaN(targetId)) {
+            return res.status(400).json({ erro: "ID fornecido é inválido. Deve ser um número inteiro." });
+        }
+
         const snapshot = await dbCollection.findOne({ id: targetId });
         
         if (!snapshot) {
@@ -472,13 +506,13 @@ app.get('/api/historico/minuto/:id', garantizarSincroniaMiddleware, async (req, 
 });
 
 // ROTA 3: CONTROLE DE IRRIGAÇÃO MANUAL (POST)
-app.post(['/api/controle/irrigacao', '/api/controle/irrigacao/'], garantizarSincroniaMiddleware, async (req, res) => {
+app.post(['/api/controle/irrigacao', '/api/controle/irrigacao/'], async (req, res) => {
     try {
         const { ligar, automatico } = req.body;
         const state = await fetchLatestState();
         if (!state) return res.status(500).json({ erro: "Sem base operacional estável." });
 
-        let novoEstado = { ...state };
+        let novoEstado = structuredClone(state);
 
         if (automatico === true) {
             novoEstado.modoIrrigacaoManual = false;
@@ -489,15 +523,12 @@ app.post(['/api/controle/irrigacao', '/api/controle/irrigacao/'], garantizarSinc
             return res.status(400).json({ erro: "Parâmetro 'ligar' inválido." });
         }
 
-        novoEstado.timestampReal = getDataBrasilia();
-        novoEstado.id = (state.id || 0) + 1;
-
-        delete novoEstado._id;
-        await dbCollection.insertOne(novoEstado);
+        const registroPronto = prepararParaInsercao(novoEstado, getDataBrasilia());
+        await dbCollection.insertOne(registroPronto);
         
         res.json({ 
             mensagem: "Configuração manual aplicada e persistida como novo registro log.",
-            statusAtual: novoEstado.statusIrrigacao 
+            statusAtual: registroPronto.statusIrrigacao 
         });
     } catch (erro) {
         res.status(500).json({ erro: "Erro ao atualizar controle dos atuadores." });
@@ -505,13 +536,16 @@ app.post(['/api/controle/irrigacao', '/api/controle/irrigacao/'], garantizarSinc
 });
 
 // ROTA 4: FORÇAR EVENTO DE PRECIPITAÇÃO ATMOSFÉRICA (POST)
-app.post(['/api/controle/chuva', '/api/controle/chuva/'], garantizarSincroniaMiddleware, async (req, res) => {
+app.post(['/api/controle/chuva', '/api/controle/chuva/'], async (req, res) => {
     try {
         const { duracao, intensidade } = req.body;
         const intensidadesValidas = ["leve", "moderada", "forte"];
 
-        if (!duracao || typeof duracao !== 'number' || duracao <= 0) {
-            return res.status(400).json({ erro: "Duração inválida." });
+        const MAX_DURACAO = 120; 
+        const duracaoInt = Math.floor(duracao);
+
+        if (!duracao || typeof duracao !== 'number' || duracaoInt <= 0 || duracaoInt > MAX_DURACAO) {
+            return res.status(400).json({ erro: `Duração inválida. Deve ser um número inteiro entre 1 e ${MAX_DURACAO} minutos.` });
         }
 
         if (!intensidade || !intensidadesValidas.includes(intensidade)) {
@@ -519,18 +553,15 @@ app.post(['/api/controle/chuva', '/api/controle/chuva/'], garantizarSincroniaMid
         }
 
         const state = await fetchLatestState();
-        let novoEstado = { ...state };
+        let novoEstado = structuredClone(state);
         
         novoEstado.estaChovendo = true;
-        novoEstado.tempoRestanteChuva = duracao;
+        novoEstado.tempoRestanteChuva = duracaoInt;
         novoEstado.intensidadeChuva = intensidade;
         novoEstado.condicaoCeu = "chuvoso";
-        novoEstado.timestampReal = getDataBrasilia();
         
-        novoEstado.id = (state.id || 0) + 1;
-
-        delete novoEstado._id;
-        await dbCollection.insertOne(novoEstado);
+        const registroPronto = prepararParaInsercao(novoEstado, getDataBrasilia());
+        await dbCollection.insertOne(registroPronto);
 
         res.json({ 
             mensagem: `Precipitação forçada injetada com sucesso no histórico.`,
@@ -544,6 +575,11 @@ app.post(['/api/controle/chuva', '/api/controle/chuva/'], garantizarSincroniaMid
 
 // ROTA 5: FORÇAR RESET COMPLETO DE DADOS E DO ID DA SIMULAÇÃO (POST)
 app.post(['/api/controle/reset-total', '/api/controle/reset-total/'], async (req, res) => {
+    if (isSyncing) {
+        return res.status(503).json({ erro: "Sincronização em andamento no banco. Tente redefinir em alguns segundos." });
+    }
+    isSyncing = true;
+
     try {
         await dbCollection.deleteMany({});
         const baseline = gerarBaselineInicial();
@@ -555,6 +591,8 @@ app.post(['/api/controle/reset-total', '/api/controle/reset-total/'], async (req
         });
     } catch (erro) {
         res.status(500).json({ erro: "Erro ao executar a rota de reset emergencial." });
+    } finally {
+        isSyncing = false;
     }
 });
 
