@@ -82,7 +82,9 @@ async function conectarBanco() {
         const db = client.db(DB_NAME);
         dbCollection = db.collection(COLLECTION_NAME);
         console.log("Connected successfully to MongoDB Atlas Cloud Cluster!");
-        
+        console.log("Wiping old collection tracking states for a clean simulation restart...");
+        await dbCollection.deleteMany({}); 
+
         const count = await dbCollection.countDocuments();
         if (count === 0) {
             await dbCollection.insertOne({
@@ -105,7 +107,7 @@ async function conectarBanco() {
             console.log("Database seeded with initial state tracking template.");
         }
     } catch (erro) {
-        console.error("Critical Database Connection Error:", erro.message);
+        console.error("Critical Database Connection Error:", erro);
         process.exit(1);
     }
 }
