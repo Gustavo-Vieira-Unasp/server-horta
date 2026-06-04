@@ -4,7 +4,7 @@ const { MongoClient } = require('mongodb');
 require('dotenv').config();
 
 const MONGO_URI = process.env.MONGO_URI;
-const DB_NAME = process.env.DB_NAME || "horta_db";
+const DB_NAME = process.env.DB_NAME || "horta_db_v2";
 const COLLECTION_NAME = process.env.COLLECTION_NAME || "estado_simulacao";
 
 const app = express();
@@ -70,9 +70,13 @@ function formatarDataHora(data) {
 }
 
 function gerarBaselineInicial() {
+    const agoraBR = getDataBrasilia();
+    const totalMinutesToday = (agoraBR.getHours() * 60) + agoraBR.getMinutes();
+    const startingId = totalMinutesToday === 0 ? 1440 : totalMinutesToday;
+
     return {
-        id: 1,
-        timestampReal: getDataBrasilia(),
+        id: startingId, 
+        timestampReal: agoraBR,
         umidadeSolo: 65.0,
         pHSolo: LETTUCE_AGRONOMY.PH_IDEAL,
         temperaturaCalculada: 22.0,
@@ -111,7 +115,7 @@ async function conectarBanco() {
         if (count === 0) {
             const initialSeed = gerarBaselineInicial();
             await dbCollection.insertOne(initialSeed);
-            console.log("Database seeded with foundational tracking node.");
+            console.log("Database seeded with dynamic foundational tracking node.");
         }
     } catch (erro) {
         console.error("Critical Database Connection Error:", erro);
@@ -281,19 +285,25 @@ async function sincronizarEProcessarHorta() {
         const diferencaMilissegundos = agoraBR.getTime() - dataUltimoEstado.getTime();
         const minutosPerdidos = Math.floor(diferencaMilissegundos / 60000);
 
-        if (minutosPerdidos > 0 && minutosPerdidos < 1440) {
-            console.log(`[ENGINE] Detectados ${minutosPerdidos} minutos offline. Iniciando backfill...`);
+        if (minutosPerdidos > 0) {
+            if (minutosPerdidos > 30) {
+                console.log(`[QUOTA GUARD] Large gap detected (${minutosPerdidos} mins). Dropping single structural node to preserve server limits.`);
+                ultimoEstado = simularProximoMinuto(ultimoEstado, agoraBR);
+                await dbCollection.insertOne(ultimoEstado);
+                return;
+            }
+
+            console.log(`[ENGINE] Processing catching up timeline: ${minutosPerdidos} missing steps.`);
             let loteNovosRegistros = [];
 
             for (let i = 1; i <= minutosPerdidos; i++) {
                 const dataCalculoPasso = new Date(dataUltimoEstado.getTime() + (i * 60000));
-
                 ultimoEstado = simularProximoMinuto(ultimoEstado, dataCalculoPasso);
                 loteNovosRegistros.push({ ...ultimoEstado });
             }
 
             await dbCollection.insertMany(loteNovosRegistros);
-            console.log(`[ENGINE] Backfill concluído com segurança! ${loteNovosRegistros.length} registros injetados.`);
+            console.log(`[ENGINE] Synchronized timeline updated with ${loteNovosRegistros.length} entries.`);
         }
     } catch (err) {
         console.error("[CRITICAL ENGINE ERROR]:", err.message);
@@ -500,12 +510,11 @@ app.post(['/api/controle/chuva', '/api/controle/chuva/'], garantizarSincroniaMid
 app.post(['/api/controle/reset-total', '/api/controle/reset-total/'], async (req, res) => {
     try {
         await dbCollection.deleteMany({});
-        
         const baseline = gerarBaselineInicial();
-
         await dbCollection.insertOne(baseline);
+
         res.json({ 
-            mensagem: "Linha do tempo limpa! Nova simulação iniciada com sucesso.",
+            mensagem: "Linha do tempo limpa! Nova simulação iniciada com sucesso sem loops de atraso.",
             dadosIniciais: baseline
         });
     } catch (erro) {
@@ -513,15 +522,15 @@ app.post(['/api/controle/reset-total', '/api/controle/reset-total/'], async (req
     }
 });
 
-// =============================================
+// =========================================================================
 // INICIALIZAÇÃO SERVER
-// =============================================
+// =========================================================================
 const PORT = process.env.PORT || 3000;
 
 conectarBanco().then(() => {
     app.listen(PORT, () => {
         console.log(`====================================================================`);
-        console.log(`BULLETPROOF CATCH-UP ENGINE POOL READY - PORTA: ${PORT}`);
+        console.log(`SAFE ENVIRONMENT WEATHER ENGINE DEPLOYED COMPLIANT ON PORT: ${PORT}`);
         console.log(`====================================================================`);
 
         const agoraInicial = new Date();
