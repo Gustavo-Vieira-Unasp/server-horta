@@ -341,10 +341,12 @@ app.get('/', (req, res) => {
 });
 
 // ROTA 1: TELEMETRIA ATUAL SIMPLES
+// ROTA 1: TELEMETRIA ATUAL SIMPLES
 app.get(['/api/aquisicao', '/api/aquisicao/'], garantizarSincroniaMiddleware, async (req, res) => {
     try {
         const snapshot = await fetchLatestState();
-        const dataHoraFormatada = formatarDataHoraCustomizada(getDataBrasilia());
+        // Captura o horário exato da requisição com os segundos reais rodando
+        const dataHoraFormatada = formatarDataHora(getDataBrasilia());
 
         res.json({
             "id": snapshot.id,
@@ -363,13 +365,13 @@ app.get(['/api/aquisicao', '/api/aquisicao/'], garantizarSincroniaMiddleware, as
 app.get(['/api/aquisicao/avancada', '/api/aquisicao/avancada/'], garantizarSincroniaMiddleware, async (req, res) => {
     try {
         const snapshot = await fetchLatestState();
-        const dataHoraFormatada = formatarDataHoraCustomizada(getDataBrasilia());
+        const dataHoraFormatada = formatarDataHora(getDataBrasilia());
 
         res.json({
             "aquisicao_avancada": [
                 {
                     "id": snapshot.id,
-                    "dataHora": getDataBrasilia(),
+                    "dataHora": dataHoraFormatada,
                     "condicoes_ambientais": {
                         "estacao": snapshot.estacaoCalculada,
                         "temperaturaCelsius": snapshot.temperaturaCalculada,
@@ -400,18 +402,18 @@ app.get(['/api/aquisicao/avancada', '/api/aquisicao/avancada/'], garantizarSincr
     }
 });
 
-// ROTA HISTÓRICO 1: OTIMIZADA PARA COLETAR DADOS PARA GRÁFICOS DO DASHBOARD
+// ROTA HISTÓRICO 1: OTIMIZADA E PADRONIZADA COM O PAYLOAD BÁSICO
 app.get(['/api/historico/completo', '/api/historico/completo/'], garantizarSincroniaMiddleware, async (req, res) => {
     try {
         const rawLogs = await dbCollection.find().sort({ timestampReal: 1 }).toArray();
         
         const timeline = rawLogs.map(log => ({
             id: log.id,
-            timestamp: formatarDataHora(log.timestampReal || getDataBrasilia()),
-            umidadeSolo: parseFloat(log.umidadeSolo.toFixed(1)),
+            dataHora: formatarDataHora(log.timestampReal || getDataBrasilia()),
+            umidadeSoloPorcentagem: parseFloat(log.umidadeSolo.toFixed(1)),
             temperatura: log.temperaturaCalculada,
-            umidadeAr: Math.round(log.umidadeArCalculada),
-            pHSolo: parseFloat(log.pHSolo.toFixed(2)),
+            UmidadeAr: Math.round(log.umidadeArCalculada),
+            pHSolo: parseFloat(log.pHSolo.toFixed(1)),
             luzSolar: log.luzCalculada,
             statusIrrigacao: log.statusIrrigacao === "LIGADO" ? 1 : 0, 
             estaChovendo: log.estaChovendo ? 1 : 0
@@ -435,7 +437,35 @@ app.get('/api/historico/minuto/:id', garantizarSincroniaMiddleware, async (req, 
         if (!snapshot) {
             return res.status(404).json({ erro: `Minuto ${targetId} ausente do histórico.` });
         }
-        res.json(snapshot);
+
+        const dataHoraFormatada = formatarDataHora(new Date(snapshot.timestampReal));
+
+        res.json({
+            "id": snapshot.id,
+            "dataHora": dataHoraFormatada,
+            "condicoes_ambientais": {
+                "estacao": snapshot.estacaoCalculada,
+                "temperaturaCelsius": snapshot.temperaturaCalculada,
+                "umidadeArPorcentagem": snapshot.umidadeArCalculada,
+                "estaChovendo": snapshot.estaChovendo,
+                "intensidadeChuva": snapshot.intensidadeChuva,
+                "luminosidadeSolarPorcentagem": snapshot.luzCalculada,
+                "condicaoCeu": snapshot.condicaoCeu,
+                "temperaturaSolo": parseFloat(snapshot.tempSolo.toFixed(1))
+            },
+            "sensores_solo": {
+                "umidadeSoloPorcentagem": parseFloat(snapshot.umidadeSolo.toFixed(1)),
+                "pHSolo": parseFloat(snapshot.pHSolo.toFixed(2)),
+                "alertaCriticoAlface": snapshot.umidadeSolo < LETTUCE_AGRONOMY.MOISTURE_CRITICAL_ALERT,
+                "capacidadeCampoPorcentagem": SOIL_PHYSICS.CAPACIDADE_CAMPO,
+                "pontoMurchaPorcentagem": SOIL_PHYSICS.PONTO_MURCHA
+            },
+            "atuadores": {
+                "statusIrrigacao": snapshot.statusIrrigacao,
+                "vazaoGotejamentoLh": snapshot.statusIrrigacao === "LIGADO" ? ACTUATOR_SPECS.DROPPER_FLOW_L_H : 0.0,
+                "controleManualAtivo": snapshot.modoIrrigacaoManual
+            }
+        });
     } catch (erro) {
         res.status(500).json({ erro: "Erro ao buscar minuto do histórico." });
     }
