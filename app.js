@@ -71,11 +71,9 @@ function formatarDataHora(data) {
 
 function gerarBaselineInicial() {
     const agoraBR = getDataBrasilia();
-    const totalMinutesToday = (agoraBR.getHours() * 60) + agoraBR.getMinutes();
-    const startingId = totalMinutesToday === 0 ? 1440 : totalMinutesToday;
 
     return {
-        id: startingId, 
+        id: 1, 
         timestampReal: agoraBR,
         umidadeSolo: 65.0,
         pHSolo: LETTUCE_AGRONOMY.PH_IDEAL,
@@ -262,8 +260,7 @@ function simularProximoMinuto(estadoAnterior, dataAlvo) {
     state.umidadeArCalculada = parseFloat(umidadeAr.toFixed(1));
     state.luzCalculada = Math.round(luzIntensidade);
 
-    const totalMinutesToday = (dataAlvo.getHours() * 60) + dataAlvo.getMinutes();
-    state.id = totalMinutesToday === 0 ? 1440 : totalMinutesToday;
+    state.id = (estadoAnterior.id || 0) + 1;
     state.timestampReal = dataAlvo;
 
     delete state._id; 
@@ -287,13 +284,13 @@ async function sincronizarEProcessarHorta() {
 
         if (minutosPerdidos > 0) {
             if (minutosPerdidos > 30) {
-                console.log(`[QUOTA GUARD] Large gap detected (${minutosPerdidos} mins). Dropping single structural node to preserve server limits.`);
+                console.log(`[QUOTA GUARD] Grande lacuna detectada (${minutosPerdidos} mins). Inserindo um nó estrutural único para preservar limites do servidor.`);
                 ultimoEstado = simularProximoMinuto(ultimoEstado, agoraBR);
                 await dbCollection.insertOne(ultimoEstado);
                 return;
             }
 
-            console.log(`[ENGINE] Processing catching up timeline: ${minutosPerdidos} missing steps.`);
+            console.log(`[ENGINE] Processando sincronização da linha do tempo: ${minutosPerdidos} passos ausentes.`);
             let loteNovosRegistros = [];
 
             for (let i = 1; i <= minutosPerdidos; i++) {
@@ -303,7 +300,7 @@ async function sincronizarEProcessarHorta() {
             }
 
             await dbCollection.insertMany(loteNovosRegistros);
-            console.log(`[ENGINE] Synchronized timeline updated with ${loteNovosRegistros.length} entries.`);
+            console.log(`[ENGINE] Linha do tempo sincronizada e atualizada com ${loteNovosRegistros.length} entradas.`);
         }
     } catch (err) {
         console.error("[CRITICAL ENGINE ERROR]:", err.message);
@@ -452,8 +449,7 @@ app.post(['/api/controle/irrigacao', '/api/controle/irrigacao/'], garantizarSinc
         }
 
         novoEstado.timestampReal = getDataBrasilia();
-        const totalMinutesToday = (novoEstado.timestampReal.getHours() * 60) + novoEstado.timestampReal.getMinutes();
-        novoEstado.id = totalMinutesToday === 0 ? 1440 : totalMinutesToday;
+        novoEstado.id = (state.id || 0) + 1;
 
         delete novoEstado._id;
         await dbCollection.insertOne(novoEstado);
@@ -490,8 +486,8 @@ app.post(['/api/controle/chuva', '/api/controle/chuva/'], garantizarSincroniaMid
         novoEstado.condicaoCeu = "chuvoso";
         novoEstado.timestampReal = getDataBrasilia();
         
-        const totalMinutesToday = (novoEstado.timestampReal.getHours() * 60) + novoEstado.timestampReal.getMinutes();
-        novoEstado.id = totalMinutesToday === 0 ? 1440 : totalMinutesToday;
+        // ALTERAÇÃO: Preserva a contagem incremental sequencial correta
+        novoEstado.id = (state.id || 0) + 1;
 
         delete novoEstado._id;
         await dbCollection.insertOne(novoEstado);
@@ -514,7 +510,7 @@ app.post(['/api/controle/reset-total', '/api/controle/reset-total/'], async (req
         await dbCollection.insertOne(baseline);
 
         res.json({ 
-            mensagem: "Linha do tempo limpa! Nova simulação iniciada com sucesso sem loops de atraso.",
+            mensagem: "Linha do tempo limpa! Nova simulação iniciada com sucesso.",
             dadosIniciais: baseline
         });
     } catch (erro) {
