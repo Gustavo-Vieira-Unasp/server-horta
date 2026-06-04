@@ -333,7 +333,7 @@ app.get('/', (req, res) => {
 app.get(['/api/aquisicao', '/api/aquisicao/'], garantizarSincroniaMiddleware, async (req, res) => {
     try {
         const snapshot = await fetchLatestState();
-        const dataHoraFormatada = formatarDataHora(snapshot.timestampReal || getDataBrasilia());
+        const dataHoraFormatada = formatarDataHora(getDataBrasilia());
 
         res.json({
             "id": snapshot.id,
@@ -352,7 +352,7 @@ app.get(['/api/aquisicao', '/api/aquisicao/'], garantizarSincroniaMiddleware, as
 app.get(['/api/aquisicao/avancada', '/api/aquisicao/avancada/'], garantizarSincroniaMiddleware, async (req, res) => {
     try {
         const snapshot = await fetchLatestState();
-        const dataHoraFormatada = formatarDataHora(snapshot.timestampReal || getDataBrasilia());
+        const dataHoraFormatada = formatarDataHora(getDataBrasilia());
 
         res.json({
             "aquisicao_avancada": [
@@ -486,7 +486,6 @@ app.post(['/api/controle/chuva', '/api/controle/chuva/'], garantizarSincroniaMid
         novoEstado.condicaoCeu = "chuvoso";
         novoEstado.timestampReal = getDataBrasilia();
         
-        // ALTERAÇÃO: Preserva a contagem incremental sequencial correta
         novoEstado.id = (state.id || 0) + 1;
 
         delete novoEstado._id;
