@@ -116,7 +116,7 @@ async function conectarBanco() {
 }
 
 // =========================================================================
-// SIMULAÇÃO LOGIC ENGINE
+// NÚCLEO DE SIMULAÇÃO (PRODUZ UM NOVO ESTADO COM BASE EM UM ANTERIOR)
 // =========================================================================
 function obterEstacaoAtual(mesZeroBased) {
     if ([11, 0, 1].includes(mesZeroBased)) return 'verao';
@@ -125,171 +125,200 @@ function obterEstacaoAtual(mesZeroBased) {
     return 'primavera';
 }
 
-async function atualizarCicloMinuto() {
-    if (!dbCollection) return;
+function simularProximoMinuto(estadoAnterior, dataAlvo) {
+    const state = JSON.parse(JSON.stringify(estadoAnterior));
     
+    const mes = dataAlvo.getMonth();
+    const horaDecimal = dataAlvo.getHours() + (dataAlvo.getMinutes() / 60);
+
+    state.estacaoCalculada = obterEstacaoAtual(mes);
+    const estacao = VARIAVEIS_ESTACAO[state.estacaoCalculada];
+
+    // 1. TEMPERATURA DO AR
+    const tRad = (horaDecimal - (estacao.amanhecer + 3.5)) * (2 * Math.PI / 24);
+    const tempBase = (estacao.maxTemp + estacao.minTemp) / 2;
+    const tempAmplitude = (estacao.maxTemp - estacao.minTemp) / 2;
+    
+    let temperaturaAtual = tempBase + (Math.sin(tRad) * tempAmplitude);
+    temperaturaAtual += (Math.random() - 0.5) * 0.6;
+
+    // 2. UMIDADE E LUZ SOLAR
+    let umidadeAr = 80.0 - (Math.sin(tRad) * 20.0);
+    let luzIntensidade = 0;
+
+    if (horaDecimal >= estacao.amanhecer && horaDecimal <= estacao.anoitecer) {
+        const totalDia = estacao.anoitecer - estacao.amanhecer;
+        const progressoDia = (horaDecimal - estacao.amanhecer) / totalDia;
+        luzIntensidade = Math.max(0, Math.sin(progressoDia * Math.PI) * 100);
+    }
+
+    // 3. CONDIÇÃO DO CÉU
+    if (!state.estaChovendo) {
+        if (dataAlvo.getMinutes() === 0) {
+            const dadosCeuRoll = Math.random();
+            state.condicaoCeu = dadosCeuRoll < 0.65 ? "ensolarado" : "nublado";
+        }
+    } else {
+        state.condicaoCeu = "chuvoso";
+    }
+
+    if (state.condicaoCeu === "nublado") {
+        luzIntensidade *= 0.55;
+        temperaturaAtual -= 1.5;
+        umidadeAr = Math.min(umidadeAr + 10, 90);
+    }
+
+    // 4. CHUVA
+    if (state.estaChovendo) {
+        state.tempoRestanteChuva--;
+        umidadeAr = 95.0;
+
+        if (state.intensidadeChuva === "leve") {
+            luzIntensidade *= 0.35;
+            temperaturaAtual -= 1.0;
+        } else if (state.intensidadeChuva === "moderada") {
+            luzIntensidade *= 0.20;
+            temperaturaAtual -= 2.2;
+        } else if (state.intensidadeChuva === "forte") {
+            luzIntensidade *= 0.08;
+            temperaturaAtual -= 3.8;
+            umidadeAr = 99.0;
+        }
+
+        let ganhoAguaMinuto = 0.05;
+        if (state.intensidadeChuva === "moderada") ganhoAguaMinuto = 0.15;
+        if (state.intensidadeChuva === "forte") ganhoAguaMinuto = 0.40;
+
+        state.umidadeSolo = Math.min(state.umidadeSolo + ganhoAguaMinuto, SOIL_PHYSICS.MAX_ABSOLUTE_MOISTURE);
+        
+        if (state.pHSolo > SOIL_PHYSICS.RAIN_WATER_PH) {
+            state.pHSolo = Math.max(state.pHSolo - 0.002, SOIL_PHYSICS.RAIN_WATER_PH);
+        }
+
+        if (state.tempoRestanteChuva <= 0) {
+            state.estaChovendo = false;
+            state.intensidadeChuva = "nenhuma";
+            state.condicaoCeu = "nublado";
+        }
+    } 
+    else {
+        if (Math.random() < estacao.chanceChuvaPorMin) {
+            state.estaChovendo = true;
+            state.tempoRestanteChuva = Math.floor(Math.random() * 45) + 15;
+
+            const rollIntensidade = Math.random();
+            if (rollIntensidade < 0.5) state.intensidadeChuva = "leve";
+            else if (rollIntensidade < 0.85) state.intensidadeChuva = "moderada";
+            else state.intensidadeChuva = "forte";
+        }
+    }
+
+    // 5. IRRIGAÇÃO AUTOMÁTICA / MANUAL
+    if (!state.modoIrrigacaoManual) {
+        if (state.umidadeSolo < LETTUCE_AGRONOMY.MOISTURE_CRITICAL_ALERT) {
+            state.statusIrrigacao = "LIGADO";
+        }
+        if (state.statusIrrigacao === "LIGADO" && state.umidadeSolo >= LETTUCE_AGRONOMY.IRRIGATION_TARGET_MAX) {
+            state.statusIrrigacao = "DESLIGADO";
+        }
+    }
+
+    if (state.statusIrrigacao === "LIGADO") {
+        state.umidadeSolo = Math.min(state.umidadeSolo + ACTUATOR_SPECS.IRRIGATION_GAIN_PER_MIN, SOIL_PHYSICS.MAX_ABSOLUTE_MOISTURE);
+        const diferencaPH = LETTUCE_AGRONOMY.PH_IDEAL - state.pHSolo;
+        state.pHSolo += diferencaPH * SOIL_PHYSICS.PH_BUFFER_FACTOR;
+    }
+
+    // 6. EVAPORAÇÃO, DRENAGEM DO SOLO & ABSORÇÃO
+    let modificadorCeuEvaporacao = 1.0;
+    if (state.condicaoCeu === "nublado") modificadorCeuEvaporacao = 0.5;
+    if (state.condicaoCeu === "chuvoso") modificadorCeuEvaporacao = 0.1;
+
+    const taxaSecagem = (0.005 + (temperaturaAtual * 0.0012) + (luzIntensidade * 0.00022)) * modificadorCeuEvaporacao;
+    const absorcaoPlanta = (temperaturaAtual > 23 ? 0.08 : 0.04) * (luzIntensidade / 100);
+    
+    state.umidadeSolo -= (taxaSecagem + absorcaoPlanta);
+
+    if (state.umidadeSolo > SOIL_PHYSICS.CAPACIDADE_CAMPO) {
+        const excessoCapacidade = state.umidadeSolo - SOIL_PHYSICS.CAPACIDADE_CAMPO;
+        state.umidadeSolo -= (excessoCapacidade * SOIL_PHYSICS.DRAINAGE_RATE_PER_MIN);
+    }
+
+    state.umidadeSolo = Math.max(state.umidadeSolo, SOIL_PHYSICS.MIN_ABSOLUTE_MOISTURE);
+
+    // 7. TEMPERATURA DO SOLO
+    state.tempSolo = (state.tempSolo * (1 - SOIL_PHYSICS.THERMAL_INERTIA_WEIGHT)) + (temperaturaAtual * SOIL_PHYSICS.THERMAL_INERTIA_WEIGHT);
+
+    // 8. ARREDONDAMENTOS E ALINHAMENTO DE HORÁRIO
+    state.temperaturaCalculada = parseFloat(temperaturaAtual.toFixed(1));
+    state.umidadeArCalculada = parseFloat(umidadeAr.toFixed(1));
+    state.luzCalculada = Math.round(luzIntensidade);
+
+    const totalMinutesToday = (dataAlvo.getHours() * 60) + dataAlvo.getMinutes();
+    state.id = totalMinutesToday === 0 ? 1440 : totalMinutesToday;
+    state.timestampReal = dataAlvo;
+
+    delete state._id; 
+    return state;
+}
+
+// =========================================================================
+// SINCRONIZAÇÃO
+// =========================================================================
+async function sincronizarEProcessarHorta() {
+    if (!dbCollection) return;
+
     try {
-        const state = await fetchLatestState();
-        if (!state) return;
-
         const agoraBR = getDataBrasilia();
-        const mes = agoraBR.getMonth();
-        const horaDecimal = agoraBR.getHours() + (agoraBR.getMinutes() / 60);
+        let ultimoEstado = await fetchLatestState();
+        if (!ultimoEstado) return;
 
-        state.estacaoCalculada = obterEstacaoAtual(mes);
-        const estacao = VARIAVEIS_ESTACAO[state.estacaoCalculada];
+        const idAlvoAtual = (agoraBR.getHours() * 60) + agoraBR.getMinutes() || 1440;
+        let ultimoIdRegistrado = ultimoEstado.id;
 
-        // 1. TEMPERATURA DO AR
-        const tRad = (horaDecimal - (estacao.amanhecer + 3.5)) * (2 * Math.PI / 24);
-        const tempBase = (estacao.maxTemp + estacao.minTemp) / 2;
-        const tempAmplitude = (estacao.maxTemp - estacao.minTemp) / 2;
-        
-        let temperaturaAtual = tempBase + (Math.sin(tRad) * tempAmplitude);
-        temperaturaAtual += (Math.random() - 0.5) * 0.6;
+        const dataUltimoEstado = new Date(ultimoEstado.timestampReal);
+        const mudouO_Dia = dataUltimoEstado.getDate() !== agoraBR.getDate();
 
-        // 2. UMIDADE E LUZ SOLAR
-        let umidadeAr = 80.0 - (Math.sin(tRad) * 20.0);
-        let luzIntensidade = 0;
-
-        if (horaDecimal >= estacao.amanhecer && horaDecimal <= estacao.anoitecer) {
-            const totalDia = estacao.anoitecer - estacao.amanhecer;
-            const progressoDia = (horaDecimal - estacao.amanhecer) / totalDia;
-            luzIntensidade = Math.max(0, Math.sin(progressoDia * Math.PI) * 100);
+        if (mudouO_Dia) {
+            ultimoIdRegistrado = 0; 
         }
 
-        // 3. CONDIÇÃO DO CÉU
-        if (!state.estaChovendo) {
-            if (agoraBR.getMinutes() === 0) {
-                const dadosCeuRoll = Math.random();
-                state.condicaoCeu = dadosCeuRoll < 0.65 ? "ensolarado" : "nublado";
+        const minutosPerdidos = idAlvoAtual - ultimoIdRegistrado;
+
+        if (minutosPerdidos > 0) {
+            console.log(`[ENGINE] Detectados ${minutosPerdidos} minutos offline. Iniciando backfill...`);
+            let loteNovosRegistros = [];
+
+            for (let i = 1; i <= minutosPerdidos; i++) {
+                const minutoPasso = ultimoIdRegistrado + i;
+                
+                const dataCalculoPasso = new Date(agoraBR);
+                dataCalculoPasso.setHours(Math.floor(minutoPasso / 60), minutoPasso % 60, 0, 0);
+
+                ultimoEstado = simularProximoMinuto(ultimoEstado, dataCalculoPasso);
+                loteNovosRegistros.push({ ...ultimoEstado });
             }
-        } else {
-            state.condicaoCeu = "chuvoso";
+
+            await dbCollection.insertMany(loteNovosRegistros);
+            console.log(`[ENGINE] Backfill concluído! ${loteNovosRegistros.length} registros injetados.`);
         }
-
-        if (state.condicaoCeu === "nublado") {
-            luzIntensidade *= 0.55;
-            temperaturaAtual -= 1.5;
-            umidadeAr = Math.min(umidadeAr + 10, 90);
-        }
-
-        // 4. CHUVA
-        if (state.estaChovendo) {
-            state.tempoRestanteChuva--;
-            umidadeAr = 95.0;
-
-            if (state.intensidadeChuva === "leve") {
-                luzIntensidade *= 0.35;
-                temperaturaAtual -= 1.0;
-            } else if (state.intensidadeChuva === "moderada") {
-                luzIntensidade *= 0.20;
-                temperaturaAtual -= 2.2;
-            } else if (state.intensidadeChuva === "forte") {
-                luzIntensidade *= 0.08;
-                temperaturaAtual -= 3.8;
-                umidadeAr = 99.0;
-            }
-
-            let ganhoAguaMinuto = 0.05;
-            if (state.intensidadeChuva === "moderada") ganhoAguaMinuto = 0.15;
-            if (state.intensidadeChuva === "forte") ganhoAguaMinuto = 0.40;
-
-            state.umidadeSolo = Math.min(state.umidadeSolo + ganhoAguaMinuto, SOIL_PHYSICS.MAX_ABSOLUTE_MOISTURE);
-            
-            if (state.pHSolo > SOIL_PHYSICS.RAIN_WATER_PH) {
-                state.pHSolo = Math.max(state.pHSolo - 0.002, SOIL_PHYSICS.RAIN_WATER_PH);
-            }
-
-            if (state.tempoRestanteChuva <= 0) {
-                state.estaChovendo = false;
-                state.intensidadeChuva = "nenhuma";
-                state.condicaoCeu = "nublado";
-            }
-        } 
-        else {
-            if (Math.random() < estacao.chanceChuvaPorMin) {
-                state.estaChovendo = true;
-                state.tempoRestanteChuva = Math.floor(Math.random() * 45) + 15;
-
-                const rollIntensidade = Math.random();
-                if (rollIntensidade < 0.5) state.intensidadeChuva = "leve";
-                else if (rollIntensidade < 0.85) state.intensidadeChuva = "moderada";
-                else state.intensidadeChuva = "forte";
-            }
-        }
-
-        // 5. IRRIGAÇÃO AUTOMÁTICA / MANUAL
-        if (!state.modoIrrigacaoManual) {
-            if (state.umidadeSolo < LETTUCE_AGRONOMY.MOISTURE_CRITICAL_ALERT) {
-                state.statusIrrigacao = "LIGADO";
-            }
-            if (state.statusIrrigacao === "LIGADO" && state.umidadeSolo >= LETTUCE_AGRONOMY.IRRIGATION_TARGET_MAX) {
-                state.statusIrrigacao = "DESLIGADO";
-            }
-        }
-
-        if (state.statusIrrigacao === "LIGADO") {
-            state.umidadeSolo = Math.min(state.umidadeSolo + ACTUATOR_SPECS.IRRIGATION_GAIN_PER_MIN, SOIL_PHYSICS.MAX_ABSOLUTE_MOISTURE);
-            const diferencaPH = LETTUCE_AGRONOMY.PH_IDEAL - state.pHSolo;
-            state.pHSolo += diferencaPH * SOIL_PHYSICS.PH_BUFFER_FACTOR;
-        }
-
-        // 6. EVAPORAÇÃO, DRENAGEM DO SOLO & ABSORÇÃO
-        let modificadorCeuEvaporacao = 1.0;
-        if (state.condicaoCeu === "nublado") modificadorCeuEvaporacao = 0.5;
-        if (state.condicaoCeu === "chuvoso") modificadorCeuEvaporacao = 0.1;
-
-        const taxaSecagem = (0.005 + (temperaturaAtual * 0.0012) + (luzIntensidade * 0.00022)) * modificadorCeuEvaporacao;
-        const absorcaoPlanta = (temperaturaAtual > 23 ? 0.08 : 0.04) * (luzIntensidade / 100);
-        
-        state.umidadeSolo -= (taxaSecagem + absorcaoPlanta);
-
-        if (state.umidadeSolo > SOIL_PHYSICS.CAPACIDADE_CAMPO) {
-            const excessoCapacidade = state.umidadeSolo - SOIL_PHYSICS.CAPACIDADE_CAMPO;
-            state.umidadeSolo -= (excessoCapacidade * SOIL_PHYSICS.DRAINAGE_RATE_PER_MIN);
-        }
-
-        state.umidadeSolo = Math.max(state.umidadeSolo, SOIL_PHYSICS.MIN_ABSOLUTE_MOISTURE);
-
-        // 7. TEMPERATURA DO SOLO
-        state.tempSolo = (state.tempSolo * (1 - SOIL_PHYSICS.THERMAL_INERTIA_WEIGHT)) + (temperaturaAtual * SOIL_PHYSICS.THERMAL_INERTIA_WEIGHT);
-
-        // 8. ARREDONDAMENTOS E ALINHAMENTO DE HORÁRIO
-        state.temperaturaCalculada = parseFloat(temperaturaAtual.toFixed(1));
-        state.umidadeArCalculada = parseFloat(umidadeAr.toFixed(1));
-        state.luzCalculada = Math.round(luzIntensidade);
-
-        const totalMinutesToday = (agoraBR.getHours() * 60) + agoraBR.getMinutes();
-        state.id = totalMinutesToday === 0 ? 1440 : totalMinutesToday;
-        state.timestampReal = agoraBR;
-
-        delete state._id;
-        await dbCollection.insertOne(state);
     } catch (err) {
-        console.error("Tick calculation failed:", err.message);
+        console.error("[CRITICAL ENGINE ERROR]:", err.message);
     }
 }
 
-// =========================================================================
-// PRECISION TIME-SYNC EXECUTION CONTROLLER
-// =========================================================================
 async function rodarCicloSincronizado() {
-    await atualizarCicloMinuto();
-
+    await sincronizarEProcessarHorta();
     const agora = new Date();
     const msAteProximoMinuto = 60000 - (agora.getSeconds() * 1000 + agora.getMilliseconds());
-    
     setTimeout(rodarCicloSincronizado, msAteProximoMinuto);
 }
 
-if (process.env.RENDER === "true" || !process.env.WEBSITE_SITE_NAME) {
-    const agoraInicial = new Date();
-    const tempoDeEsperaInicial = 60000 - (agoraInicial.getSeconds() * 1000 + agoraInicial.getMilliseconds());
-    
-    console.log(`Simulation engine booting...`);
-    console.log(`Aligning with clock core. Next cycle will trigger in ${parseFloat((tempoDeEsperaInicial / 1000).toFixed(1))}s at the next top of the minute.`);
-    
-    setTimeout(rodarCicloSincronizado, tempoDeEsperaInicial);
+async function garantirSincroniaMiddleware(req, res, next) {
+    if (dbCollection) {
+        await sincronizarEProcessarHorta();
+    }
+    next();
 }
 
 // =========================================================================
@@ -301,7 +330,7 @@ app.get('/', (req, res) => {
 });
 
 // ROTA 1: TELEMETRIA ATUAL SIMPLES
-app.get(['/api/aquisicao', '/api/aquisicao/'], async (req, res) => {
+app.get(['/api/aquisicao', '/api/aquisicao/'], garantirSincroniaMiddleware, async (req, res) => {
     try {
         const snapshot = await fetchLatestState();
         const dataHoraFormatada = formatarDataHora(snapshot.timestampReal || getDataBrasilia());
@@ -320,7 +349,7 @@ app.get(['/api/aquisicao', '/api/aquisicao/'], async (req, res) => {
 });
 
 // ROTA 2: TELEMETRIA ATUAL AVANÇADA
-app.get(['/api/aquisicao/avancada', '/api/aquisicao/avancada/'], async (req, res) => {
+app.get(['/api/aquisicao/avancada', '/api/aquisicao/avancada/'], garantirSincroniaMiddleware, async (req, res) => {
     try {
         const snapshot = await fetchLatestState();
         const dataHoraFormatada = formatarDataHora(snapshot.timestampReal || getDataBrasilia());
@@ -361,7 +390,7 @@ app.get(['/api/aquisicao/avancada', '/api/aquisicao/avancada/'], async (req, res
 });
 
 // ROTA HISTÓRICO 1: OTIMIZADA PARA COLETAR DADOS PARA GRÁFICOS DO DASHBOARD
-app.get(['/api/historico/completo', '/api/historico/completo/'], async (req, res) => {
+app.get(['/api/historico/completo', '/api/historico/completo/'], garantirSincroniaMiddleware, async (req, res) => {
     try {
         const rawLogs = await dbCollection.find().sort({ timestampReal: 1 }).toArray();
         
@@ -387,7 +416,7 @@ app.get(['/api/historico/completo', '/api/historico/completo/'], async (req, res
 });
 
 // ROTA HISTÓRICO 2: BUSCAR DETALHES DE UM MINUTO ESPECÍFICO
-app.get('/api/historico/minuto/:id', async (req, res) => {
+app.get('/api/historico/minuto/:id', garantirSincroniaMiddleware, async (req, res) => {
     try {
         const targetId = parseInt(req.params.id);
         const snapshot = await dbCollection.findOne({ id: targetId });
@@ -402,28 +431,33 @@ app.get('/api/historico/minuto/:id', async (req, res) => {
 });
 
 // ROTA 3: CONTROLE DE IRRIGAÇÃO MANUAL (POST)
-app.post(['/api/controle/irrigacao', '/api/controle/irrigacao/'], async (req, res) => {
+app.post(['/api/controle/irrigacao', '/api/controle/irrigacao/'], garantirSincroniaMiddleware, async (req, res) => {
     try {
         const { ligar, automatico } = req.body;
         const state = await fetchLatestState();
         if (!state) return res.status(500).json({ erro: "Sem base operacional estável." });
 
+        let novoEstado = { ...state };
+
         if (automatico === true) {
-            state.modoIrrigacaoManual = false;
+            novoEstado.modoIrrigacaoManual = false;
         } else if (typeof ligar === 'boolean') {
-            state.modoIrrigacaoManual = true;
-            state.statusIrrigacao = ligar ? "LIGADO" : "DESLIGADO";
+            novoEstado.modoIrrigacaoManual = true;
+            novoEstado.statusIrrigacao = ligar ? "LIGADO" : "DESLIGADO";
         } else {
             return res.status(400).json({ erro: "Parâmetro 'ligar' inválido." });
         }
 
-        delete state._id;
-        state.timestampReal = getDataBrasilia();
-        await dbCollection.insertOne(state);
+        novoEstado.timestampReal = getDataBrasilia();
+        const totalMinutesToday = (novoEstado.timestampReal.getHours() * 60) + novoEstado.timestampReal.getMinutes();
+        novoEstado.id = totalMinutesToday === 0 ? 1440 : totalMinutesToday;
+
+        delete novoEstado._id;
+        await dbCollection.insertOne(novoEstado);
         
         res.json({ 
             mensagem: "Configuração manual aplicada e persistida como novo registro log.",
-            statusAtual: state.statusIrrigacao 
+            statusAtual: novoEstado.statusIrrigacao 
         });
     } catch (erro) {
         res.status(500).json({ erro: "Erro ao atualizar controle dos atuadores." });
@@ -431,7 +465,7 @@ app.post(['/api/controle/irrigacao', '/api/controle/irrigacao/'], async (req, re
 });
 
 // ROTA 4: FORÇAR EVENTO DE PRECIPITAÇÃO ATMOSFÉRICA (POST)
-app.post(['/api/controle/chuva', '/api/controle/chuva/'], async (req, res) => {
+app.post(['/api/controle/chuva', '/api/controle/chuva/'], garantirSincroniaMiddleware, async (req, res) => {
     try {
         const { duracao, intensidade } = req.body;
         const intensidadesValidas = ["leve", "moderada", "forte"];
@@ -445,14 +479,19 @@ app.post(['/api/controle/chuva', '/api/controle/chuva/'], async (req, res) => {
         }
 
         const state = await fetchLatestState();
-        state.estaChovendo = true;
-        state.tempoRestanteChuva = duracao;
-        state.intensidadeChuva = intensidade;
-        state.condicaoCeu = "chuvoso";
+        let novoEstado = { ...state };
+        
+        novoEstado.estaChovendo = true;
+        novoEstado.tempoRestanteChuva = duracao;
+        novoEstado.intensidadeChuva = intensidade;
+        novoEstado.condicaoCeu = "chuvoso";
+        novoEstado.timestampReal = getDataBrasilia();
+        
+        const totalMinutesToday = (novoEstado.timestampReal.getHours() * 60) + novoEstado.timestampReal.getMinutes();
+        novoEstado.id = totalMinutesToday === 0 ? 1440 : totalMinutesToday;
 
-        delete state._id;
-        state.timestampReal = getDataBrasilia();
-        await dbCollection.insertOne(state);
+        delete novoEstado._id;
+        await dbCollection.insertOne(novoEstado);
 
         res.json({ 
             mensagem: `Precipitação forçada injetada com sucesso no histórico.`,
@@ -505,7 +544,11 @@ const PORT = process.env.PORT || 3000;
 conectarBanco().then(() => {
     app.listen(PORT, () => {
         console.log(`====================================================================`);
-        console.log(`ENGINE POOL OPERATIONAL - HISTÓRICO COMPLETO ATIVADO PORTA: ${PORT}`);
+        console.log(`BULLETPROOF CATCH-UP ENGINE POOL READY - PORTA: ${PORT}`);
         console.log(`====================================================================`);
+
+        const agoraInicial = new Date();
+        const tempoDeEsperaInicial = 60000 - (agoraInicial.getSeconds() * 1000 + agoraInicial.getMilliseconds());
+        setTimeout(rodarCicloSincronizado, tempoDeEsperaInicial);
     });
 });
