@@ -69,6 +69,17 @@ function formatarDataHora(data) {
     return `${ano}-${mes}-${dia} ${hora}:${minuto}:${segundo}`;
 }
 
+function formatarDataHoraCustomizada(data) {
+    const pad = (num) => String(num).padStart(2, '0');
+    const ano = data.getFullYear();
+    const mes = pad(data.getMonth() + 1);
+    const dia = pad(data.getDate());
+    const hora = pad(data.getHours());
+    const minuto = pad(data.getMinutes());
+    
+    return `${ano}-${mes}-${dia} ${hora}:${minuto}:00`;
+}
+
 function gerarBaselineInicial() {
     const agoraBR = getDataBrasilia();
 
@@ -333,7 +344,7 @@ app.get('/', (req, res) => {
 app.get(['/api/aquisicao', '/api/aquisicao/'], garantizarSincroniaMiddleware, async (req, res) => {
     try {
         const snapshot = await fetchLatestState();
-        const dataHoraFormatada = formatarDataHora(getDataBrasilia());
+        const dataHoraFormatada = formatarDataHoraCustomizada(getDataBrasilia());
 
         res.json({
             "id": snapshot.id,
@@ -352,7 +363,7 @@ app.get(['/api/aquisicao', '/api/aquisicao/'], garantizarSincroniaMiddleware, as
 app.get(['/api/aquisicao/avancada', '/api/aquisicao/avancada/'], garantizarSincroniaMiddleware, async (req, res) => {
     try {
         const snapshot = await fetchLatestState();
-        const dataHoraFormatada = formatarDataHora(getDataBrasilia());
+        const dataHoraFormatada = formatarDataHoraCustomizada(getDataBrasilia());
 
         res.json({
             "aquisicao_avancada": [
