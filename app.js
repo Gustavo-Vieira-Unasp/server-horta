@@ -267,7 +267,7 @@ function simularProximoMinuto(estadoAnterior, dataAlvo) {
 }
 
 // =========================================================================
-// SINCRONIZAÇÃO
+// SINCRONIZAÇÃO COMPORTAMENTAL BASEADA EM SEGUNDOS ABSOLUTOS (PROTEÇÃO UTC)
 // =========================================================================
 async function sincronizarEProcessarHorta() {
     if (!dbCollection) return;
@@ -277,34 +277,23 @@ async function sincronizarEProcessarHorta() {
         let ultimoEstado = await fetchLatestState();
         if (!ultimoEstado) return;
 
-        const idAlvoAtual = (agoraBR.getHours() * 60) + agoraBR.getMinutes() || 1440;
-        let ultimoIdRegistrado = ultimoEstado.id;
-
         const dataUltimoEstado = new Date(ultimoEstado.timestampReal);
-        const mudouO_Dia = dataUltimoEstado.getDate() !== agoraBR.getDate();
+        const diferencaMilissegundos = agoraBR.getTime() - dataUltimoEstado.getTime();
+        const minutosPerdidos = Math.floor(diferencaMilissegundos / 60000);
 
-        if (mudouO_Dia) {
-            ultimoIdRegistrado = 0; 
-        }
-
-        const minutosPerdidos = idAlvoAtual - ultimoIdRegistrado;
-
-        if (minutosPerdidos > 0) {
+        if (minutosPerdidos > 0 && minutosPerdidos < 1440) {
             console.log(`[ENGINE] Detectados ${minutosPerdidos} minutos offline. Iniciando backfill...`);
             let loteNovosRegistros = [];
 
             for (let i = 1; i <= minutosPerdidos; i++) {
-                const minutoPasso = ultimoIdRegistrado + i;
-                
-                const dataCalculoPasso = new Date(agoraBR);
-                dataCalculoPasso.setHours(Math.floor(minutoPasso / 60), minutoPasso % 60, 0, 0);
+                const dataCalculoPasso = new Date(dataUltimoEstado.getTime() + (i * 60000));
 
                 ultimoEstado = simularProximoMinuto(ultimoEstado, dataCalculoPasso);
                 loteNovosRegistros.push({ ...ultimoEstado });
             }
 
             await dbCollection.insertMany(loteNovosRegistros);
-            console.log(`[ENGINE] Backfill concluído! ${loteNovosRegistros.length} registros injetados.`);
+            console.log(`[ENGINE] Backfill concluído com segurança! ${loteNovosRegistros.length} registros injetados.`);
         }
     } catch (err) {
         console.error("[CRITICAL ENGINE ERROR]:", err.message);
@@ -512,7 +501,6 @@ app.post(['/api/controle/reset-total', '/api/controle/reset-total/'], async (req
     try {
         await dbCollection.deleteMany({});
         
-        // Agora usa o helper centralizado livre de hardcodes estruturais
         const baseline = gerarBaselineInicial();
 
         await dbCollection.insertOne(baseline);
