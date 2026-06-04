@@ -69,6 +69,10 @@ function formatarDataHora(data) {
     return `${ano}-${mes}-${dia} ${hora}:${minuto}:${segundo}`;
 }
 
+async function fetchLatestState() {
+    return await dbCollection.find().sort({ timestampReal: -1 }).limit(1).next();
+}
+
 // =========================================================================
 // CONEXÃO MONGODB
 // =========================================================================
@@ -82,15 +86,12 @@ async function conectarBanco() {
         const db = client.db(DB_NAME);
         dbCollection = db.collection(COLLECTION_NAME);
         console.log("Connected successfully to MongoDB Atlas Cloud Cluster!");
-        
-        console.log("Wiping old collection tracking states for a clean simulation restart...");
-        await dbCollection.deleteMany({}); 
 
         const count = await dbCollection.countDocuments();
         if (count === 0) {
-            await dbCollection.insertOne({
-                _id: "global_state",
+            const initialSeed = {
                 id: 1,
+                timestampReal: getDataBrasilia(),
                 umidadeSolo: 65.0,
                 pHSolo: 6.2,
                 temperaturaCalculada: 22.0,
@@ -104,8 +105,9 @@ async function conectarBanco() {
                 estacaoCalculada: "outono",
                 tempSolo: 21.5,
                 modoIrrigacaoManual: false
-            });
-            console.log("Database seeded with initial state tracking template.");
+            };
+            await dbCollection.insertOne(initialSeed);
+            console.log("Database seeded with foundational tracking node.");
         }
     } catch (erro) {
         console.error("Critical Database Connection Error:", erro);
@@ -127,7 +129,7 @@ async function atualizarCicloMinuto() {
     if (!dbCollection) return;
     
     try {
-        const state = await dbCollection.findOne({ _id: "global_state" });
+        const state = await fetchLatestState();
         if (!state) return;
 
         const agoraBR = getDataBrasilia();
@@ -252,24 +254,42 @@ async function atualizarCicloMinuto() {
         // 7. TEMPERATURA DO SOLO
         state.tempSolo = (state.tempSolo * (1 - SOIL_PHYSICS.THERMAL_INERTIA_WEIGHT)) + (temperaturaAtual * SOIL_PHYSICS.THERMAL_INERTIA_WEIGHT);
 
-        // 8. PERSISTÊNCIA DOS ARREDONDAMENTOS E ALINHAMENTO DE HORÁRIO
+        // 8. ARREDONDAMENTOS E ALINHAMENTO DE HORÁRIO
         state.temperaturaCalculada = parseFloat(temperaturaAtual.toFixed(1));
         state.umidadeArCalculada = parseFloat(umidadeAr.toFixed(1));
         state.luzCalculada = Math.round(luzIntensidade);
 
         const totalMinutesToday = (agoraBR.getHours() * 60) + agoraBR.getMinutes();
         state.id = totalMinutesToday === 0 ? 1440 : totalMinutesToday;
+        state.timestampReal = agoraBR;
 
         delete state._id;
-        await dbCollection.updateOne({ _id: "global_state" }, { $set: state });
+        await dbCollection.insertOne(state);
     } catch (err) {
         console.error("Tick calculation failed:", err.message);
     }
 }
 
+// =========================================================================
+// PRECISION TIME-SYNC EXECUTION CONTROLLER
+// =========================================================================
+async function rodarCicloSincronizado() {
+    await atualizarCicloMinuto();
+
+    const agora = new Date();
+    const msAteProximoMinuto = 60000 - (agora.getSeconds() * 1000 + agora.getMilliseconds());
+    
+    setTimeout(rodarCicloSincronizado, msAteProximoMinuto);
+}
+
 if (process.env.RENDER === "true" || !process.env.WEBSITE_SITE_NAME) {
-    console.log("Simulation Loop initialized on master calculation core.");
-    setInterval(atualizarCicloMinuto, 60000);
+    const agoraInicial = new Date();
+    const tempoDeEsperaInicial = 60000 - (agoraInicial.getSeconds() * 1000 + agoraInicial.getMilliseconds());
+    
+    console.log(`Simulation engine booting...`);
+    console.log(`Aligning with clock core. Next cycle will trigger in ${parseFloat((tempoDeEsperaInicial / 1000).toFixed(1))}s at the next top of the minute.`);
+    
+    setTimeout(rodarCicloSincronizado, tempoDeEsperaInicial);
 }
 
 // =========================================================================
@@ -280,12 +300,11 @@ app.get('/', (req, res) => {
     res.send('API da Horta Inteligente ativa com persistência MongoDB.');
 });
 
-// ROTA 1: BÁSICA
+// ROTA 1: TELEMETRIA ATUAL SIMPLES
 app.get(['/api/aquisicao', '/api/aquisicao/'], async (req, res) => {
     try {
-        const snapshot = await dbCollection.findOne({ _id: "global_state" });
-        const agoraBR = getDataBrasilia();
-        const dataHoraFormatada = formatarDataHora(agoraBR);
+        const snapshot = await fetchLatestState();
+        const dataHoraFormatada = formatarDataHora(snapshot.timestampReal || getDataBrasilia());
 
         res.json({
             "id": snapshot.id,
@@ -300,12 +319,11 @@ app.get(['/api/aquisicao', '/api/aquisicao/'], async (req, res) => {
     }
 });
 
-// ROTA 2: AVANÇADA
+// ROTA 2: TELEMETRIA ATUAL AVANÇADA
 app.get(['/api/aquisicao/avancada', '/api/aquisicao/avancada/'], async (req, res) => {
     try {
-        const snapshot = await dbCollection.findOne({ _id: "global_state" });
-        const agoraBR = getDataBrasilia();
-        const dataHoraFormatada = formatarDataHora(agoraBR);
+        const snapshot = await fetchLatestState();
+        const dataHoraFormatada = formatarDataHora(snapshot.timestampReal || getDataBrasilia());
 
         res.json({
             "aquisicao_avancada": [
@@ -342,29 +360,73 @@ app.get(['/api/aquisicao/avancada', '/api/aquisicao/avancada/'], async (req, res
     }
 });
 
+// ROTA HISTÓRICO 1: OTIMIZADA PARA COLETAR DADOS PARA GRÁFICOS DO DASHBOARD
+app.get(['/api/historico/completo', '/api/historico/completo/'], async (req, res) => {
+    try {
+        const rawLogs = await dbCollection.find().sort({ timestampReal: 1 }).toArray();
+        
+        const timeline = rawLogs.map(log => ({
+            id: log.id,
+            timestamp: formatarDataHora(log.timestampReal || getDataBrasilia()),
+            umidadeSolo: parseFloat(log.umidadeSolo.toFixed(1)),
+            temperatura: log.temperaturaCalculada,
+            umidadeAr: Math.round(log.umidadeArCalculada),
+            pHSolo: parseFloat(log.pHSolo.toFixed(2)),
+            luzSolar: log.luzCalculada,
+            statusIrrigacao: log.statusIrrigacao === "LIGADO" ? 1 : 0, 
+            estaChovendo: log.estaChovendo ? 1 : 0
+        }));
+
+        res.json({
+            totalRegistros: timeline.length,
+            dashboardData: timeline
+        });
+    } catch (erro) {
+        res.status(500).json({ erro: "Erro ao extrair histórico de dados para o dashboard." });
+    }
+});
+
+// ROTA HISTÓRICO 2: BUSCAR DETALHES DE UM MINUTO ESPECÍFICO
+app.get('/api/historico/minuto/:id', async (req, res) => {
+    try {
+        const targetId = parseInt(req.params.id);
+        const snapshot = await dbCollection.findOne({ id: targetId });
+        
+        if (!snapshot) {
+            return res.status(404).json({ erro: `Minuto ${targetId} ausente do histórico.` });
+        }
+        res.json(snapshot);
+    } catch (erro) {
+        res.status(500).json({ erro: "Erro ao buscar minuto do histórico." });
+    }
+});
+
 // ROTA 3: CONTROLE DE IRRIGAÇÃO MANUAL (POST)
 app.post(['/api/controle/irrigacao', '/api/controle/irrigacao/'], async (req, res) => {
     try {
         const { ligar, automatico } = req.body;
-        let updateQuery = {};
+        const state = await fetchLatestState();
+        if (!state) return res.status(500).json({ erro: "Sem base operacional estável." });
 
         if (automatico === true) {
-            updateQuery = { modoIrrigacaoManual: false };
+            state.modoIrrigacaoManual = false;
         } else if (typeof ligar === 'boolean') {
-            updateQuery = { modoIrrigacaoManual: true, statusIrrigacao: ligar ? "LIGADO" : "DESLIGADO" };
+            state.modoIrrigacaoManual = true;
+            state.statusIrrigacao = ligar ? "LIGADO" : "DESLIGADO";
         } else {
-            return res.status(400).json({ erro: "Parâmetro 'ligar' inválido. Forneça um valor booleano." });
+            return res.status(400).json({ erro: "Parâmetro 'ligar' inválido." });
         }
 
-        await dbCollection.updateOne({ _id: "global_state" }, { $set: updateQuery });
+        delete state._id;
+        state.timestampReal = getDataBrasilia();
+        await dbCollection.insertOne(state);
         
-        const freshSnapshot = await dbCollection.findOne({ _id: "global_state" });
         res.json({ 
-            mensagem: "Configuração de atuador salva e sincronizada globalmente no cluster.",
-            statusAtual: freshSnapshot.statusIrrigacao 
+            mensagem: "Configuração manual aplicada e persistida como novo registro log.",
+            statusAtual: state.statusIrrigacao 
         });
     } catch (erro) {
-        res.status(500).json({ erro: "Erro ao atualizar controle dos atuadores no MongoDB." });
+        res.status(500).json({ erro: "Erro ao atualizar controle dos atuadores." });
     }
 });
 
@@ -375,24 +437,30 @@ app.post(['/api/controle/chuva', '/api/controle/chuva/'], async (req, res) => {
         const intensidadesValidas = ["leve", "moderada", "forte"];
 
         if (!duracao || typeof duracao !== 'number' || duracao <= 0) {
-            return res.status(400).json({ erro: "Duração inválida. Especifique o tempo em minutos." });
+            return res.status(400).json({ erro: "Duração inválida." });
         }
 
         if (!intensidade || !intensidadesValidas.includes(intensidade)) {
-            return res.status(400).json({ erro: "Intensidade inválida. Escolha entre: leve, moderada ou forte." });
+            return res.status(400).json({ erro: "Intensidade inválida." });
         }
 
-        await dbCollection.updateOne({ _id: "global_state" }, {
-            $set: { estaChovendo: true, tempoRestanteChuva: duracao, intensidadeChuva: intensidade, condicaoCeu: "chuvoso" }
-        });
+        const state = await fetchLatestState();
+        state.estaChovendo = true;
+        state.tempoRestanteChuva = duracao;
+        state.intensidadeChuva = intensidade;
+        state.condicaoCeu = "chuvoso";
+
+        delete state._id;
+        state.timestampReal = getDataBrasilia();
+        await dbCollection.insertOne(state);
 
         res.json({ 
-            mensagem: `Evento climático inserido com sucesso.`,
+            mensagem: `Precipitação forçada injetada com sucesso no histórico.`,
             condicaoCeu: "chuvoso",
             intensidade: intensidade
         });
     } catch (erro) {
-        res.status(500).json({ erro: "Erro ao injetar comando climático no MongoDB." });
+        res.status(500).json({ erro: "Erro ao injetar comando climático." });
     }
 });
 
@@ -402,8 +470,8 @@ app.post(['/api/controle/reset-total', '/api/controle/reset-total/'], async (req
         await dbCollection.deleteMany({});
         
         const baseline = {
-            _id: "global_state",
             id: 1,
+            timestampReal: getDataBrasilia(),
             umidadeSolo: 65.0,
             pHSolo: 6.2,
             temperaturaCalculada: 22.0,
@@ -421,7 +489,7 @@ app.post(['/api/controle/reset-total', '/api/controle/reset-total/'], async (req
 
         await dbCollection.insertOne(baseline);
         res.json({ 
-            mensagem: "Reset manual concluído com sucesso! Coleção limpa e ID reiniciado para 1.",
+            mensagem: "Linha do tempo limpa! Nova simulação iniciada com sucesso.",
             dadosIniciais: baseline
         });
     } catch (erro) {
@@ -430,14 +498,14 @@ app.post(['/api/controle/reset-total', '/api/controle/reset-total/'], async (req
 });
 
 // =============================================
-// INICIALIZAÇÃO ASYNCHRONOUS ENGINE
+// INICIALIZAÇÃO SERVER
 // =============================================
 const PORT = process.env.PORT || 3000;
 
 conectarBanco().then(() => {
     app.listen(PORT, () => {
         console.log(`====================================================================`);
-        console.log(`ENGINE POOL OPERATIONAL - SIMULAÇÃO HORTA INTELIGENTE PORTA: ${PORT}`);
+        console.log(`ENGINE POOL OPERATIONAL - HISTÓRICO COMPLETO ATIVADO PORTA: ${PORT}`);
         console.log(`====================================================================`);
     });
 });
