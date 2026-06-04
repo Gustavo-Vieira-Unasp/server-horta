@@ -369,7 +369,7 @@ app.get(['/api/aquisicao/avancada', '/api/aquisicao/avancada/'], garantizarSincr
             "aquisicao_avancada": [
                 {
                     "id": snapshot.id,
-                    "dataHora": dataHoraFormatada,
+                    "dataHora": getDataBrasilia(),
                     "condicoes_ambientais": {
                         "estacao": snapshot.estacaoCalculada,
                         "temperaturaCelsius": snapshot.temperaturaCalculada,
