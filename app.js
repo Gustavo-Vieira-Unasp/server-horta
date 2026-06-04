@@ -82,6 +82,7 @@ async function conectarBanco() {
         const db = client.db(DB_NAME);
         dbCollection = db.collection(COLLECTION_NAME);
         console.log("Connected successfully to MongoDB Atlas Cloud Cluster!");
+        
         console.log("Wiping old collection tracking states for a clean simulation restart...");
         await dbCollection.deleteMany({}); 
 
@@ -251,7 +252,7 @@ async function atualizarCicloMinuto() {
         // 7. TEMPERATURA DO SOLO
         state.tempSolo = (state.tempSolo * (1 - SOIL_PHYSICS.THERMAL_INERTIA_WEIGHT)) + (temperaturaAtual * SOIL_PHYSICS.THERMAL_INERTIA_WEIGHT);
 
-        // 8. PERSISTÊNCIA DOS ARREDONDAMENTOS
+        // 8. PERSISTÊNCIA DOS ARREDONDAMENTOS E ALINHAMENTO DE HORÁRIO
         state.temperaturaCalculada = parseFloat(temperaturaAtual.toFixed(1));
         state.umidadeArCalculada = parseFloat(umidadeAr.toFixed(1));
         state.luzCalculada = Math.round(luzIntensidade);
@@ -259,7 +260,6 @@ async function atualizarCicloMinuto() {
         const totalMinutesToday = (agoraBR.getHours() * 60) + agoraBR.getMinutes();
         state.id = totalMinutesToday === 0 ? 1440 : totalMinutesToday;
 
-        // Strip structural tracking attributes before document replace
         delete state._id;
         await dbCollection.updateOne({ _id: "global_state" }, { $set: state });
     } catch (err) {
@@ -393,6 +393,39 @@ app.post(['/api/controle/chuva', '/api/controle/chuva/'], async (req, res) => {
         });
     } catch (erro) {
         res.status(500).json({ erro: "Erro ao injetar comando climático no MongoDB." });
+    }
+});
+
+// ROTA 5: FORÇAR RESET COMPLETO DE DADOS E DO ID DA SIMULAÇÃO (POST)
+app.post(['/api/controle/reset-total', '/api/controle/reset-total/'], async (req, res) => {
+    try {
+        await dbCollection.deleteMany({});
+        
+        const baseline = {
+            _id: "global_state",
+            id: 1,
+            umidadeSolo: 65.0,
+            pHSolo: 6.2,
+            temperaturaCalculada: 22.0,
+            umidadeArCalculada: 75.0,
+            luzCalculada: 0,
+            estaChovendo: false,
+            condicaoCeu: "ensolarado",
+            intensidadeChuva: "nenhuma",
+            tempoRestanteChuva: 0,
+            statusIrrigacao: "DESLIGADO",
+            estacaoCalculada: "outono",
+            tempSolo: 21.5,
+            modoIrrigacaoManual: false
+        };
+
+        await dbCollection.insertOne(baseline);
+        res.json({ 
+            mensagem: "Reset manual concluído com sucesso! Coleção limpa e ID reiniciado para 1.",
+            dadosIniciais: baseline
+        });
+    } catch (erro) {
+        res.status(500).json({ erro: "Erro ao executar a rota de reset emergencial." });
     }
 });
 
