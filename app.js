@@ -25,6 +25,7 @@ const GEOGRAPHIC_CONFIG = {
 };
 
 const ALTITUDE_TEMP_CORRECTION = (GEOGRAPHIC_CONFIG.ELEVATION_METERS / 100) * 0.65;
+const TWO_PI_OVER_365 = (2 * Math.PI) / 365;
 
 const LETTUCE_AGRONOMY = {
     PH_IDEAL: 6.2,
@@ -166,12 +167,15 @@ function simularProximoMinuto(estadoAnterior, dataAlvo) {
     state.estacaoCalculada = obterEstacaoAtual(mes);
     const estacao = VARIAVEIS_ESTACAO[state.estacaoCalculada];
 
-    // 1. TEMPERATURA DO AR
+    // 1. TEMPERATURA DO AR (INTEGRAÇÃO DE MODELO SAZONAL CONTÍNUO)
     const tRad = (horaDecimal - (estacao.amanhecer + 3.5)) * (2 * Math.PI / 24);
     const tempBase = (estacao.maxTemp + estacao.minTemp) / 2;
     const tempAmplitude = (estacao.maxTemp - estacao.minTemp) / 2;
-    
-    let temperaturaAtual = tempBase + (Math.sin(tRad) * tempAmplitude);
+    const inicioAno = new Date(dataAlvo.getFullYear(), 0, 0);
+    const diferencaMs = dataAlvo.getTime() - inicioAno.getTime();
+    const dayOfYear = Math.floor(diferencaMs / 86400000);
+    const calibracaoSazonal = 3.5 * Math.cos(TWO_PI_OVER_365 * (dayOfYear - 15));
+    let temperaturaAtual = tempBase + calibracaoSazonal + (Math.sin(tRad) * tempAmplitude);
     
     temperaturaAtual -= ALTITUDE_TEMP_CORRECTION;
 
@@ -287,7 +291,6 @@ function simularProximoMinuto(estadoAnterior, dataAlvo) {
     // 8. ARREDONDAMENTOS E ALINHAMENTO DE HORÁRIO
     state.temperaturaCalculada = parseFloat(temperaturaAtual.toFixed(1));
     state.umidadeArCalculada = parseFloat(umidadeAr.toFixed(1));
-    
     state.luzCalculada = Math.min(Math.round(luzIntensidade), 100);
 
     return prepararParaInsercao(state, dataAlvo, (estadoAnterior.id || 0) + 1);
