@@ -1,3 +1,6 @@
+const { webcrypto } = require('node:crypto');
+globalThis.crypto ??= webcrypto;
+
 const express = require('express');
 const cors = require('cors');
 const { MongoClient } = require('mongodb');
@@ -114,6 +117,11 @@ async function fetchLatestState() {
     return await dbCollection.find().sort({ timestampReal: -1 }).limit(1).next();
 }
 
+async function fetchNextId() {
+    const maxDoc = await dbCollection.find().sort({ id: -1 }).limit(1).project({ id: 1 }).next();
+    return (maxDoc?.id || 0) + 1;
+}
+
 // =========================================================================
 // CONEXÃO MONGODB
 // =========================================================================
@@ -158,7 +166,7 @@ function obterEstacaoAtual(mesZeroBased) {
     return 'primavera';
 }
 
-function simularProximoMinuto(estadoAnterior, dataAlvo) {
+function simularProximoMinuto(estadoAnterior, dataAlvo, proximoId = null) {
     const state = structuredClone(estadoAnterior);
     
     const mes = dataAlvo.getMonth();
@@ -293,7 +301,8 @@ function simularProximoMinuto(estadoAnterior, dataAlvo) {
     state.umidadeArCalculada = parseFloat(umidadeAr.toFixed(1));
     state.luzCalculada = Math.min(Math.round(luzIntensidade), 100);
 
-    return prepararParaInsercao(state, dataAlvo, (estadoAnterior.id || 0) + 1);
+    const novoId = proximoId !== null ? proximoId : (estadoAnterior.id || 0) + 1;
+    return prepararParaInsercao(state, dataAlvo, novoId);
 }
 
 // =========================================================================
@@ -317,17 +326,19 @@ async function sincronizarEProcessarHorta() {
         if (minutosPerdidos > 0) {
             if (minutosPerdidos > 30) {
                 console.log(`[QUOTA GUARD] Grande lacuna detectada (${minutosPerdidos} mins). Inserindo um nó estrutural único para preservar limites do servidor.`);
-                ultimoEstado = simularProximoMinuto(ultimoEstado, agoraBR);
+                const proximoId = await fetchNextId();
+                ultimoEstado = simularProximoMinuto(ultimoEstado, agoraBR, proximoId);
                 await dbCollection.insertOne(ultimoEstado);
                 return;
             }
 
             console.log(`[ENGINE] Processando sincronização da linha do tempo: ${minutosPerdidos} passos ausentes.`);
             let loteNovosRegistros = [];
+            let proximoId = await fetchNextId();
 
             for (let i = 1; i <= minutosPerdidos; i++) {
                 const dataCalculoPasso = new Date(dataUltimoEstado.getTime() + (i * 60000));
-                ultimoEstado = simularProximoMinuto(ultimoEstado, dataCalculoPasso);
+                ultimoEstado = simularProximoMinuto(ultimoEstado, dataCalculoPasso, proximoId++);
                 loteNovosRegistros.push({ ...ultimoEstado });
             }
 
@@ -526,7 +537,7 @@ app.post(['/api/controle/irrigacao', '/api/controle/irrigacao/'], async (req, re
             return res.status(400).json({ erro: "Parâmetro 'ligar' inválido." });
         }
 
-        const registroPronto = prepararParaInsercao(novoEstado, getDataBrasilia());
+        const registroPronto = prepararParaInsercao(novoEstado, getDataBrasilia(), await fetchNextId());
         await dbCollection.insertOne(registroPronto);
         
         res.json({ 
@@ -563,7 +574,7 @@ app.post(['/api/controle/chuva', '/api/controle/chuva/'], async (req, res) => {
         novoEstado.intensidadeChuva = intensidade;
         novoEstado.condicaoCeu = "chuvoso";
         
-        const registroPronto = prepararParaInsercao(novoEstado, getDataBrasilia());
+        const registroPronto = prepararParaInsercao(novoEstado, getDataBrasilia(), await fetchNextId());
         await dbCollection.insertOne(registroPronto);
 
         res.json({ 
